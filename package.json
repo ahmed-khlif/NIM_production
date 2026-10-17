@@ -1,0 +1,27 @@
+{
+  "name": "nim-production",
+  "private": true,
+  "packageManager": "pnpm@12.5.1",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @nim/web --filter @nim/api dev",
+    "build": "pnpm -r --if-present build",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
+    "lint:e2e": "eslint playwright.config.ts e2e",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.6.4",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0"
+  }
+}

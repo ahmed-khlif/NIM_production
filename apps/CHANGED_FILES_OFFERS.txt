@@ -1,0 +1,49 @@
+# Files added/changed for Offer workspace compared with previous Façonnage version
+
+Only in /mnt/data/nim_offer_complete: CHANGED_FILES_OFFERS.txt
+Only in /mnt/data/nim_offer_complete: UPDATE_OFFERS_WORKSPACE.md
+Only in /mnt/data/nim_offer_complete/api/prisma/migrations: 20261014170000_offers_isolation
+Files /mnt/data/nim_review/api/prisma/schema.prisma and /mnt/data/nim_offer_complete/api/prisma/schema.prisma differ
+Files /mnt/data/nim_review/api/src/app.module.ts and /mnt/data/nim_offer_complete/api/src/app.module.ts differ
+Files /mnt/data/nim_review/api/src/assignments/assignments.controller.ts and /mnt/data/nim_offer_complete/api/src/assignments/assignments.controller.ts differ
+Files /mnt/data/nim_review/api/src/assignments/assignments.service.ts and /mnt/data/nim_offer_complete/api/src/assignments/assignments.service.ts differ
+Files /mnt/data/nim_review/api/src/faconnage/faconnage.controller.ts and /mnt/data/nim_offer_complete/api/src/faconnage/faconnage.controller.ts differ
+Files /mnt/data/nim_review/api/src/faconnage/faconnage.service.ts and /mnt/data/nim_offer_complete/api/src/faconnage/faconnage.service.ts differ
+Files /mnt/data/nim_review/api/src/faconnage/faconnage.types.ts and /mnt/data/nim_offer_complete/api/src/faconnage/faconnage.types.ts differ
+Files /mnt/data/nim_review/api/src/history/history.controller.ts and /mnt/data/nim_offer_complete/api/src/history/history.controller.ts differ
+Files /mnt/data/nim_review/api/src/history/history.service.ts and /mnt/data/nim_offer_complete/api/src/history/history.service.ts differ
+Only in /mnt/data/nim_offer_complete/api/src: offers
+Only in /mnt/data/nim_offer_complete/api/src/pieces: offer-pieces.controller.ts
+Files /mnt/data/nim_review/api/src/pieces/pieces.controller.ts and /mnt/data/nim_offer_complete/api/src/pieces/pieces.controller.ts differ
+Files /mnt/data/nim_review/api/src/pieces/pieces.module.ts and /mnt/data/nim_offer_complete/api/src/pieces/pieces.module.ts differ
+Files /mnt/data/nim_review/api/src/pieces/pieces.service.ts and /mnt/data/nim_offer_complete/api/src/pieces/pieces.service.ts differ
+Files /mnt/data/nim_review/api/src/production/production.service.ts and /mnt/data/nim_offer_complete/api/src/production/production.service.ts differ
+Files /mnt/data/nim_review/api/src/quality/quality.controller.ts and /mnt/data/nim_offer_complete/api/src/quality/quality.controller.ts differ
+Files /mnt/data/nim_review/api/src/quality/quality.service.ts and /mnt/data/nim_offer_complete/api/src/quality/quality.service.ts differ
+Files /mnt/data/nim_review/api/test/assignments.service.test.ts and /mnt/data/nim_offer_complete/api/test/assignments.service.test.ts differ
+Only in /mnt/data/nim_offer_complete/api/test: faconnage.service.test.ts
+Only in /mnt/data/nim_offer_complete/api/test: offers.service.test.ts
+Files /mnt/data/nim_review/api/test/pieces.service.test.ts and /mnt/data/nim_offer_complete/api/test/pieces.service.test.ts differ
+Files /mnt/data/nim_review/api/test/production.service.test.ts and /mnt/data/nim_offer_complete/api/test/production.service.test.ts differ
+Only in /mnt/data/nim_offer_complete/web/app/(app): offers
+Files /mnt/data/nim_review/web/app/(app)/pieces/[id]/page.tsx and /mnt/data/nim_offer_complete/web/app/(app)/pieces/[id]/page.tsx differ
+Files /mnt/data/nim_review/web/app/(app)/pieces/faconnage/page.tsx and /mnt/data/nim_offer_complete/web/app/(app)/pieces/faconnage/page.tsx differ
+Files /mnt/data/nim_review/web/app/(app)/pieces/import/page.tsx and /mnt/data/nim_offer_complete/web/app/(app)/pieces/import/page.tsx differ
+Files /mnt/data/nim_review/web/app/(app)/pieces/page.tsx and /mnt/data/nim_offer_complete/web/app/(app)/pieces/page.tsx differ
+Files /mnt/data/nim_review/web/app/(app)/production/page.tsx and /mnt/data/nim_offer_complete/web/app/(app)/production/page.tsx differ
+Files /mnt/data/nim_review/web/components/layout/app-header.tsx and /mnt/data/nim_offer_complete/web/components/layout/app-header.tsx differ
+Files /mnt/data/nim_review/web/components/layout/app-sidebar.tsx and /mnt/data/nim_offer_complete/web/components/layout/app-sidebar.tsx differ
+Files /mnt/data/nim_review/web/components/layout/global-command-palette.tsx and /mnt/data/nim_offer_complete/web/components/layout/global-command-palette.tsx differ
+Files /mnt/data/nim_review/web/features/assignments/assignments-view.tsx and /mnt/data/nim_offer_complete/web/features/assignments/assignments-view.tsx differ
+Files /mnt/data/nim_review/web/features/auth/auth-client.ts and /mnt/data/nim_offer_complete/web/features/auth/auth-client.ts differ
+Files /mnt/data/nim_review/web/features/dashboard/dashboard-view.tsx and /mnt/data/nim_offer_complete/web/features/dashboard/dashboard-view.tsx differ
+Files /mnt/data/nim_review/web/features/history/history-view.tsx and /mnt/data/nim_offer_complete/web/features/history/history-view.tsx differ
+Only in /mnt/data/nim_offer_complete/web/features: offers
+Files /mnt/data/nim_review/web/features/operator/operator-view.tsx and /mnt/data/nim_offer_complete/web/features/operator/operator-view.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/faconnage-optimization-panel.tsx and /mnt/data/nim_offer_complete/web/features/pieces/faconnage-optimization-panel.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/faconnage-preparation-view.tsx and /mnt/data/nim_offer_complete/web/features/pieces/faconnage-preparation-view.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/piece-detail-view.tsx and /mnt/data/nim_offer_complete/web/features/pieces/piece-detail-view.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/piece-image-gallery.tsx and /mnt/data/nim_offer_complete/web/features/pieces/piece-image-gallery.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/piece-import-view.tsx and /mnt/data/nim_offer_complete/web/features/pieces/piece-import-view.tsx differ
+Files /mnt/data/nim_review/web/features/pieces/pieces-view.tsx and /mnt/data/nim_offer_complete/web/features/pieces/pieces-view.tsx differ
+Files /mnt/data/nim_review/web/features/quality/quality-view.tsx and /mnt/data/nim_offer_complete/web/features/quality/quality-view.tsx differ

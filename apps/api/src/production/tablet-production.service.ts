@@ -1,0 +1,1154 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma } from "@prisma/client";
+import {
+  productionMonitorQuerySchema,
+  reportProductionNonConformitySchema,
+  startMachineSessionSchema,
+} from "@nim/validation";
+import type {
+  MachineSessionMember,
+  MachineSessionSummary,
+  ManagedCuttingBar,
+  OperatorIdentity,
+  ProductionMonitorBar,
+  ProductionNonConformity,
+  ProductionRunSummary,
+  TabletMachineOption,
+  TabletProductionRun,
+} from "@nim/types";
+import { randomUUID } from "node:crypto";
+import type { OperatorAuthContext } from "../operators/operator-auth.types";
+import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { RealtimeService } from "../realtime/realtime.service";
+
+const machineSelect = {
+  id: true,
+  name: true,
+  internalNumber: true,
+  type: true,
+  status: true,
+} as const;
+const operatorSelect = { id: true, displayName: true } as const;
+const sessionInclude = {
+  machine: { select: machineSelect },
+  members: { include: { operator: { select: operatorSelect } }, orderBy: { joinedAt: "asc" } },
+} as const;
+const nonConformityInclude = {
+  pieceUnit: { include: { piece: { select: { id: true, offerId: true, reference: true } } } },
+  cuttingBar: { select: { id: true, reference: true } },
+  offer: { select: { id: true, reference: true } },
+  machine: { select: { id: true, name: true } },
+  reportedByOperator: { select: operatorSelect },
+} as const;
+const barInclude = {
+  offer: { select: { id: true, reference: true, status: true } },
+  items: {
+    where: { active: true },
+    include: {
+      pieceUnit: {
+        include: {
+          piece: {
+            select: {
+              id: true,
+              offerId: true,
+              reference: true,
+              profile: true,
+              lengthMm: true,
+              unitWeightKg: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  },
+  assignments: {
+    where: { active: true },
+    include: { machine: { select: machineSelect } },
+    orderBy: { assignedAt: "desc" },
+    take: 1,
+  },
+  nonConformities: {
+    where: { status: "OPEN" },
+    include: nonConformityInclude,
+    orderBy: { reportedAt: "desc" },
+  },
+} as const;
+const runInclude = {
+  cuttingBar: { include: barInclude },
+  machine: { select: machineSelect },
+  machineSession: { include: sessionInclude },
+  startedByOperator: { select: operatorSelect },
+  nonConformities: {
+    where: { status: "OPEN" },
+    include: nonConformityInclude,
+    orderBy: { reportedAt: "desc" },
+  },
+} as const;
+type SessionRecord = Prisma.MachineSessionGetPayload<{ include: typeof sessionInclude }>;
+type BarRecord = Prisma.CuttingBarGetPayload<{ include: typeof barInclude }>;
+type RunRecord = Prisma.ProductionRunGetPayload<{ include: typeof runInclude }>;
+type NonConformityRecord = Prisma.NonConformityGetPayload<{ include: typeof nonConformityInclude }>;
+
+function toIdentity(operator: OperatorIdentity): OperatorIdentity {
+  return { id: operator.id, displayName: operator.displayName };
+}
+
+function toTeam(members: SessionRecord["members"], activeOnly = false): MachineSessionMember[] {
+  return members
+    .filter((member) => !activeOnly || member.active)
+    .map((member) => ({ ...toIdentity(member.operator), role: member.role }));
+}
+
+function toSession(session: SessionRecord, activeOnly = false): MachineSessionSummary {
+  return {
+    id: session.id,
+    status: session.status,
+    machineId: session.machineId,
+    machineName: session.machine.name,
+    machineInternalNumber: session.machine.internalNumber,
+    leadOperatorId: session.leadOperatorId,
+    startedAt: session.startedAt.toISOString(),
+    endedAt: session.endedAt?.toISOString() ?? null,
+    team: toTeam(session.members, activeOnly),
+  };
+}
+
+function toNonConformity(row: NonConformityRecord): ProductionNonConformity {
+  return {
+    id: row.id,
+    offerId: row.offerId,
+    pieceId: row.pieceId,
+    pieceUnitId: row.pieceUnitId,
+    cuttingBarId: row.cuttingBarId,
+    productionRunId: row.productionRunId,
+    machineId: row.machineId,
+    pieceReference: row.pieceUnit.piece.reference,
+    sequenceNumber: row.pieceUnit.sequenceNumber,
+    barReference: row.cuttingBar.reference,
+    offerReference: row.offer.reference,
+    machineName: row.machine.name,
+    reportedBy: toIdentity(row.reportedByOperator),
+    reason: row.reason,
+    comment: row.comment,
+    status: row.status,
+    reportedAt: row.reportedAt.toISOString(),
+  };
+}
+
+function toBar(bar: BarRecord): ManagedCuttingBar {
+  const activeAssignment = bar.assignments[0];
+  return {
+    id: bar.id,
+    offerId: bar.offerId,
+    offerReference: bar.offer.reference,
+    cuttingPlanId: bar.cuttingPlanId,
+    reference: bar.reference,
+    profile: bar.profile,
+    rawLengthMm: bar.rawLengthMm,
+    usedLengthMm: bar.usedLengthMm,
+    wasteMm: bar.wasteMm,
+    status: bar.status,
+    qualityStatus: bar.qualityStatus,
+    machine: activeAssignment
+      ? {
+          id: activeAssignment.machine.id,
+          name: activeAssignment.machine.name,
+          internalNumber: activeAssignment.machine.internalNumber,
+        }
+      : null,
+    items: bar.items.map((item) => ({
+      id: item.id,
+      pieceUnitId: item.pieceUnitId,
+      pieceId: item.pieceUnit.pieceId,
+      reference: item.pieceUnit.piece.reference,
+      sequenceNumber: item.pieceUnit.sequenceNumber,
+      lengthMm: item.pieceUnit.piece.lengthMm,
+      weightKg:
+        item.pieceUnit.piece.unitWeightKg === null
+          ? null
+          : Number(item.pieceUnit.piece.unitWeightKg),
+      status: item.pieceUnit.status,
+      productionStatus: item.pieceUnit.productionStatus,
+      qualityStatus: item.pieceUnit.qualityStatus,
+      active: item.active,
+    })),
+    assignmentHistory: bar.assignments.map((assignment) => ({
+      id: assignment.id,
+      machineId: assignment.machineId,
+      machineName: assignment.machine.name,
+      assignedAt: assignment.assignedAt.toISOString(),
+      unassignedAt: assignment.unassignedAt?.toISOString() ?? null,
+      active: assignment.active,
+    })),
+    createdAt: bar.createdAt.toISOString(),
+  };
+}
+
+function toRunSummary(run: RunRecord): ProductionRunSummary {
+  return {
+    id: run.id,
+    offerId: run.cuttingBar.offerId,
+    offerReference: run.cuttingBar.offer.reference,
+    cuttingBarId: run.cuttingBarId,
+    barReference: run.cuttingBar.reference,
+    profile: run.cuttingBar.profile,
+    rawLengthMm: run.cuttingBar.rawLengthMm,
+    status: run.status,
+    machineId: run.machineId,
+    machineName: run.machine.name,
+    machineInternalNumber: run.machine.internalNumber,
+    machineSessionId: run.machineSessionId,
+    startedByOperatorId: run.startedByOperatorId,
+    startedAt: run.startedAt.toISOString(),
+    finishedAt: run.finishedAt?.toISOString() ?? null,
+    team: toTeam(run.machineSession.members),
+    pieceCount: run.cuttingBar.items.length,
+    openNonConformityCount: run.nonConformities.length,
+  };
+}
+
+function toTabletRun(run: RunRecord): TabletProductionRun {
+  return {
+    ...toRunSummary(run),
+    bar: toBar(run.cuttingBar),
+    nonConformities: run.nonConformities.map(toNonConformity),
+  };
+}
+
+@Injectable()
+export class TabletProductionService {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(RealtimeService) private readonly realtime: RealtimeService,
+  ) {}
+
+  async listActiveMachines(): Promise<{ machines: TabletMachineOption[] }> {
+    const machines = await this.prisma.machine.findMany({
+      where: { status: "ACTIVE" },
+      select: {
+        ...machineSelect,
+        barAssignments: {
+          where: { active: true, cuttingBar: { status: "AFFECTEE" } },
+          select: { id: true },
+        },
+      },
+      orderBy: [{ name: "asc" }, { internalNumber: "asc" }],
+    });
+    return {
+      machines: machines.map((machine) => ({
+        id: machine.id,
+        name: machine.name,
+        internalNumber: machine.internalNumber,
+        type: machine.type,
+        waitingBars: machine.barAssignments.length,
+      })),
+    };
+  }
+
+  async listAvailableOperators(auth: OperatorAuthContext) {
+    const operators = await this.prisma.user.findMany({
+      where: {
+        role: "OPERATOR",
+        isActive: true,
+        id: { not: auth.operator.id },
+        machineSessionMemberships: { none: { active: true } },
+      },
+      select: operatorSelect,
+      orderBy: { displayName: "asc" },
+    });
+    return { operators };
+  }
+
+  async startMachineSession(auth: OperatorAuthContext, input: unknown) {
+    const parsed = startMachineSessionSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Choisissez une machine et vérifiez l’équipe sélectionnée.",
+        details: parsed.error.flatten(),
+      });
+    }
+    const operatorIds = [auth.operator.id, ...parsed.data.helperOperatorIds];
+    try {
+      const sessionId = await this.prisma.$transaction(
+        async (transaction) => {
+          const [machine, operators, existingMembership] = await Promise.all([
+            transaction.machine.findUnique({ where: { id: parsed.data.machineId } }),
+            transaction.user.findMany({
+              where: { id: { in: operatorIds }, role: "OPERATOR", isActive: true },
+              select: operatorSelect,
+            }),
+            transaction.machineSessionOperator.findFirst({
+              where: { operatorId: { in: operatorIds }, active: true },
+              select: { operatorId: true },
+            }),
+          ]);
+          if (!machine)
+            throw new NotFoundException({
+              code: "MACHINE_NOT_FOUND",
+              message: "Machine introuvable.",
+            });
+          if (machine.status !== "ACTIVE") {
+            throw new ConflictException({
+              code: "MACHINE_UNAVAILABLE",
+              message: "Cette machine n’est pas disponible.",
+            });
+          }
+          if (operators.length !== operatorIds.length) {
+            throw new ConflictException({
+              code: "OPERATOR_UNAVAILABLE",
+              message: "Un opérateur sélectionné n’est plus disponible.",
+            });
+          }
+          if (existingMembership) {
+            throw new ConflictException({
+              code: "OPERATOR_SESSION_CONFLICT",
+              message: "Un membre de l’équipe est déjà dans une session machine.",
+            });
+          }
+          const session = await transaction.machineSession.create({
+            data: { machineId: machine.id, leadOperatorId: auth.operator.id },
+          });
+          await transaction.machineSessionOperator.createMany({
+            data: operatorIds.map((operatorId) => ({
+              id: randomUUID(),
+              machineSessionId: session.id,
+              operatorId,
+              role: operatorId === auth.operator.id ? "LEAD" : "HELPER",
+            })),
+          });
+          await transaction.user.update({
+            where: { id: auth.operator.id },
+            data: { lastLoginAt: new Date() },
+          });
+          await transaction.historyEvent.create({
+            data: {
+              eventType: "MACHINE_SESSION_STARTED",
+              entityType: "MACHINE_SESSION",
+              entityId: session.id,
+              actorUserId: auth.operator.id,
+              actorRole: "OPERATOR",
+              metadata: { machineId: machine.id, userIds: operatorIds },
+            },
+          });
+          return session.id;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+      this.realtime.publish({
+        type: "machine-session.started",
+        entityType: "MACHINE_SESSION",
+        entityId: sessionId,
+        actorUserId: auth.operator.id,
+      });
+      return this.getCurrentSession(auth);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === "P2002" || error.code === "P2034")
+      ) {
+        throw new ConflictException({
+          code: "MACHINE_SESSION_CONFLICT",
+          message: "La machine ou un opérateur vient d’être pris par une autre session.",
+        });
+      }
+      throw error;
+    }
+  }
+
+  async getCurrentSession(auth: OperatorAuthContext) {
+    const membership = await this.prisma.machineSessionOperator.findFirst({
+      where: { operatorId: auth.operator.id, active: true, machineSession: { status: "ACTIVE" } },
+      include: { machineSession: { include: sessionInclude } },
+      orderBy: { joinedAt: "desc" },
+    });
+    if (!membership) return { session: null, bars: [], activeRun: null };
+
+    const session = membership.machineSession;
+    const [assignments, run] = await Promise.all([
+      this.prisma.machineBarAssignment.findMany({
+        where: { machineId: session.machineId, active: true, cuttingBar: { status: "AFFECTEE" } },
+        include: { cuttingBar: { include: barInclude } },
+        orderBy: { assignedAt: "asc" },
+      }),
+      this.prisma.productionRun.findFirst({
+        where: { machineSessionId: session.id, status: "RUNNING" },
+        include: runInclude,
+      }),
+    ]);
+    return {
+      session: toSession(session, true),
+      bars: assignments.map((assignment) => toBar(assignment.cuttingBar)),
+      activeRun: run ? toTabletRun(run) : null,
+    };
+  }
+
+  async endMachineSession(auth: OperatorAuthContext, sessionId: string) {
+    await this.prisma.$transaction(async (transaction) => {
+      const membership = await transaction.machineSessionOperator.findFirst({
+        where: {
+          machineSessionId: sessionId,
+          operatorId: auth.operator.id,
+          active: true,
+          machineSession: { status: "ACTIVE" },
+        },
+        include: { machineSession: true },
+      });
+      if (!membership)
+        throw new NotFoundException({
+          code: "MACHINE_SESSION_NOT_FOUND",
+          message: "Session machine introuvable.",
+        });
+      const running = await transaction.productionRun.findFirst({
+        where: { machineSessionId: sessionId, status: "RUNNING" },
+        select: { id: true },
+      });
+      if (running) {
+        throw new ConflictException({
+          code: "SESSION_HAS_RUNNING_PRODUCTION",
+          message: "Impossible de terminer la session. Une fabrication est encore en cours.",
+        });
+      }
+      const endedAt = new Date();
+      const changed = await transaction.machineSession.updateMany({
+        where: { id: sessionId, status: "ACTIVE" },
+        data: { status: "ENDED", endedAt },
+      });
+      if (changed.count !== 1)
+        throw new ConflictException({
+          code: "MACHINE_SESSION_ALREADY_ENDED",
+          message: "Cette session est déjà terminée.",
+        });
+      await transaction.machineSessionOperator.updateMany({
+        where: { machineSessionId: sessionId, active: true },
+        data: { active: false, leftAt: endedAt },
+      });
+      await transaction.historyEvent.create({
+        data: {
+          eventType: "MACHINE_SESSION_ENDED",
+          entityType: "MACHINE_SESSION",
+          entityId: sessionId,
+          actorUserId: auth.operator.id,
+          actorRole: "OPERATOR",
+          metadata: {
+            machineId: membership.machineSession.machineId,
+            endedAt: endedAt.toISOString(),
+          },
+        },
+      });
+    });
+    this.realtime.publish({
+      type: "machine-session.ended",
+      entityType: "MACHINE_SESSION",
+      entityId: sessionId,
+      actorUserId: auth.operator.id,
+    });
+    return { success: true as const };
+  }
+
+  async getAssignedBar(auth: OperatorAuthContext, barId: string) {
+    const current = await this.getCurrentSession(auth);
+    if (!current.session)
+      throw new ConflictException({
+        code: "ACTIVE_MACHINE_SESSION_REQUIRED",
+        message: "Démarrez une session machine avant de consulter une barre.",
+      });
+    const bar = await this.prisma.cuttingBar.findFirst({
+      where: {
+        id: barId,
+        status: "AFFECTEE",
+        assignments: { some: { machineId: current.session.machineId, active: true } },
+      },
+      include: barInclude,
+    });
+    if (!bar)
+      throw new NotFoundException({
+        code: "ASSIGNED_BAR_NOT_FOUND",
+        message: "Cette barre n’est pas dans la file de votre machine.",
+      });
+    return { bar: toBar(bar), session: current.session };
+  }
+
+  async startBar(auth: OperatorAuthContext, barId: string) {
+    try {
+      const runId = await this.prisma.$transaction(async (transaction) => {
+        const membership = await transaction.machineSessionOperator.findFirst({
+          where: {
+            operatorId: auth.operator.id,
+            active: true,
+            machineSession: { status: "ACTIVE" },
+          },
+          include: { machineSession: { include: { machine: true } } },
+        });
+        if (!membership)
+          throw new ConflictException({
+            code: "ACTIVE_MACHINE_SESSION_REQUIRED",
+            message: "Démarrez une session machine avant de lancer la fabrication.",
+          });
+        const { machineSession } = membership;
+        if (machineSession.machine.status !== "ACTIVE") {
+          throw new ConflictException({
+            code: "MACHINE_UNAVAILABLE",
+            message: "La machine n’est plus disponible.",
+          });
+        }
+        const bar = await transaction.cuttingBar.findUnique({
+          where: { id: barId },
+          include: barInclude,
+        });
+        if (!bar || bar.status === "CANCELLED")
+          throw new NotFoundException({ code: "BAR_NOT_FOUND", message: "Barre introuvable." });
+        if (bar.status !== "AFFECTEE")
+          throw new ConflictException({
+            code: "BAR_NOT_READY",
+            message: "Cette barre n’est pas en attente de fabrication.",
+          });
+        if (!bar.items.length)
+          throw new ConflictException({
+            code: "BAR_HAS_NO_PIECES",
+            message: "Cette barre ne contient aucune pièce active.",
+          });
+        if (
+          !bar.assignments.some((assignment) => assignment.machineId === machineSession.machineId)
+        ) {
+          throw new ConflictException({
+            code: "BAR_ASSIGNED_TO_ANOTHER_MACHINE",
+            message: "Cette barre n’est pas affectée à votre machine.",
+          });
+        }
+        if (!["READY", "IN_PRODUCTION"].includes(bar.offer.status)) {
+          throw new ConflictException({
+            code: "OFFER_NOT_READY_FOR_PRODUCTION",
+            message: "L’offre n’est pas prête pour la production.",
+          });
+        }
+        if (
+          bar.items.some(
+            (item) =>
+              item.pieceUnit.status !== "ASSIGNED" ||
+              item.pieceUnit.productionStatus !== "AFFECTEE",
+          )
+        ) {
+          throw new ConflictException({
+            code: "BAR_PIECES_NOT_READY",
+            message: "Toutes les pièces de cette barre doivent être affectées et prêtes.",
+          });
+        }
+        const unitIds = bar.items.map((item) => item.pieceUnitId);
+        const assignment = bar.assignments.find(
+          (item) => item.machineId === machineSession.machineId,
+        );
+        if (!assignment)
+          throw new ConflictException({
+            code: "BAR_ASSIGNMENT_NOT_FOUND",
+            message: "L’affectation machine de cette barre est introuvable.",
+          });
+        const unitAssignments = await transaction.assignment.count({
+          where: {
+            pieceUnitId: { in: unitIds },
+            machineId: machineSession.machineId,
+            active: true,
+            barAssignmentId: assignment.id,
+          },
+        });
+        if (unitAssignments !== unitIds.length)
+          throw new ConflictException({
+            code: "BAR_ASSIGNMENT_INCOMPLETE",
+            message: "Les affectations des pièces de cette barre ne sont plus cohérentes.",
+          });
+
+        const barLock = await transaction.cuttingBar.updateMany({
+          where: { id: bar.id, status: "AFFECTEE" },
+          data: { status: "LANCEE" },
+        });
+        if (barLock.count !== 1)
+          throw new ConflictException({
+            code: "BAR_ALREADY_STARTED",
+            message: "Cette barre vient d’être lancée par une autre session.",
+          });
+        const startedAt = new Date();
+        const unitsChanged = await transaction.pieceUnit.updateMany({
+          where: { id: { in: unitIds }, status: "ASSIGNED", productionStatus: "AFFECTEE" },
+          data: {
+            status: "IN_PROGRESS",
+            productionStatus: "LANCEE",
+            currentProductionOperatorId: auth.operator.id,
+            startedAt,
+            version: { increment: 1 },
+          },
+        });
+        if (unitsChanged.count !== unitIds.length)
+          throw new ConflictException({
+            code: "BAR_PIECES_CONCURRENT_UPDATE",
+            message: "Une pièce de cette barre a changé d’état. Actualisez la file.",
+          });
+        const run = await transaction.productionRun.create({
+          data: {
+            cuttingBarId: bar.id,
+            machineId: machineSession.machineId,
+            machineSessionId: machineSession.id,
+            startedByOperatorId: auth.operator.id,
+            startedAt,
+          },
+        });
+        const pieceIds = [...new Set(bar.items.map((item) => item.pieceUnit.pieceId))];
+        await transaction.piece.updateMany({
+          where: { id: { in: pieceIds }, status: { in: ["PLANNED", "ASSIGNED"] } },
+          data: { status: "IN_PROGRESS", version: { increment: 1 } },
+        });
+        if (bar.offer.status === "READY") {
+          const offerChanged = await transaction.offer.updateMany({
+            where: { id: bar.offerId, status: "READY" },
+            data: { status: "IN_PRODUCTION", version: { increment: 1 } },
+          });
+          if (offerChanged.count === 1) {
+            await transaction.historyEvent.create({
+              data: {
+                eventType: "OFFER_PRODUCTION_STARTED",
+                entityType: "OFFER",
+                entityId: bar.offerId,
+                actorUserId: auth.operator.id,
+                actorRole: "OPERATOR",
+                metadata: { barId: bar.id, productionRunId: run.id },
+              },
+            });
+          }
+        }
+        await transaction.historyEvent.createMany({
+          data: [
+            {
+              eventType: "BAR_PRODUCTION_STARTED",
+              entityType: "CUTTING_BAR",
+              entityId: bar.id,
+              actorUserId: auth.operator.id,
+              actorRole: "OPERATOR",
+              metadata: {
+                offerId: bar.offerId,
+                machineId: machineSession.machineId,
+                machineSessionId: machineSession.id,
+                productionRunId: run.id,
+                previousStatus: "AFFECTEE",
+                newStatus: "LANCEE",
+              },
+            },
+            {
+              eventType: "PRODUCTION_STARTED",
+              entityType: "PRODUCTION_RUN",
+              entityId: run.id,
+              actorUserId: auth.operator.id,
+              actorRole: "OPERATOR",
+              metadata: {
+                offerId: bar.offerId,
+                barId: bar.id,
+                machineId: machineSession.machineId,
+                machineSessionId: machineSession.id,
+                pieceUnitIds: unitIds,
+                previousStatus: "AFFECTEE",
+                newStatus: "LANCEE",
+              },
+            },
+            ...bar.items.map((item) => ({
+              eventType: "PIECE_PRODUCTION_STARTED",
+              entityType: "PIECE_UNIT",
+              entityId: item.pieceUnitId,
+              actorUserId: auth.operator.id,
+              actorRole: "OPERATOR" as const,
+              metadata: {
+                offerId: bar.offerId,
+                barId: bar.id,
+                productionRunId: run.id,
+                previousStatus: "AFFECTEE",
+                newStatus: "LANCEE",
+              },
+            })),
+          ],
+        });
+      await transaction.user.update({
+          where: { id: auth.operator.id },
+        data: { lastLoginAt: startedAt },
+        });
+        return run.id;
+      });
+      this.realtime.publish({
+        type: "production.started",
+        entityType: "PRODUCTION_RUN",
+        entityId: runId,
+        actorUserId: auth.operator.id,
+      });
+      return this.getRun(auth, runId);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw new ConflictException({
+          code: "PRODUCTION_ALREADY_RUNNING",
+          message: "Une fabrication est déjà en cours sur cette barre ou cette machine.",
+        });
+      }
+      throw error;
+    }
+  }
+
+  async getRun(auth: OperatorAuthContext, runId: string) {
+    const run = await this.prisma.productionRun.findUnique({
+      where: { id: runId },
+      include: runInclude,
+    });
+    if (!run)
+      throw new NotFoundException({
+        code: "PRODUCTION_RUN_NOT_FOUND",
+        message: "Fabrication introuvable.",
+      });
+    const membership = await this.prisma.machineSessionOperator.findFirst({
+      where: { machineSessionId: run.machineSessionId, operatorId: auth.operator.id, active: true },
+      select: { id: true },
+    });
+    if (!membership)
+      throw new NotFoundException({
+        code: "PRODUCTION_RUN_NOT_FOUND",
+        message: "Fabrication introuvable.",
+      });
+    return { run: toTabletRun(run) };
+  }
+
+  async finishRun(auth: OperatorAuthContext, runId: string) {
+    const result = await this.prisma.$transaction(async (transaction) => {
+      const run = await transaction.productionRun.findUnique({
+        where: { id: runId },
+        include: runInclude,
+      });
+      if (!run)
+        throw new NotFoundException({
+          code: "PRODUCTION_RUN_NOT_FOUND",
+          message: "Fabrication introuvable.",
+        });
+      const membership = await transaction.machineSessionOperator.findFirst({
+        where: {
+          machineSessionId: run.machineSessionId,
+          operatorId: auth.operator.id,
+          active: true,
+          machineSession: { status: "ACTIVE" },
+        },
+        select: { id: true },
+      });
+      if (!membership)
+        throw new NotFoundException({
+          code: "PRODUCTION_RUN_NOT_FOUND",
+          message: "Fabrication introuvable.",
+        });
+      if (run.status !== "RUNNING" || run.cuttingBar.status !== "LANCEE") {
+        throw new ConflictException({
+          code: "PRODUCTION_RUN_NOT_RUNNING",
+          message: "Cette fabrication n’est plus en cours.",
+        });
+      }
+      const unitIds = run.cuttingBar.items.map((item) => item.pieceUnitId);
+      if (
+        unitIds.length === 0 ||
+        run.cuttingBar.items.some(
+          (item) =>
+            item.pieceUnit.status !== "IN_PROGRESS" || item.pieceUnit.productionStatus !== "LANCEE",
+        )
+      ) {
+        throw new ConflictException({
+          code: "BAR_PIECES_NOT_IN_PROGRESS",
+          message: "Les pièces de cette barre ne sont pas toutes en fabrication.",
+        });
+      }
+      const finishedAt = new Date();
+      const changedRun = await transaction.productionRun.updateMany({
+        where: { id: run.id, status: "RUNNING" },
+        data: { status: "COMPLETED", finishedAt },
+      });
+      if (changedRun.count !== 1)
+        throw new ConflictException({
+          code: "PRODUCTION_RUN_CONCURRENT_UPDATE",
+          message: "Cette fabrication vient d’être terminée.",
+        });
+      const changedUnits = await transaction.pieceUnit.updateMany({
+        where: { id: { in: unitIds }, status: "IN_PROGRESS", productionStatus: "LANCEE" },
+        data: {
+          status: "QUALITY_PENDING",
+          productionStatus: "FABRIQUEE",
+          currentProductionOperatorId: null,
+          manufacturedAt: finishedAt,
+          version: { increment: 1 },
+        },
+      });
+      if (changedUnits.count !== unitIds.length)
+        throw new ConflictException({
+          code: "BAR_PIECES_CONCURRENT_UPDATE",
+          message: "Une pièce de cette barre a changé d’état.",
+        });
+      const changedBar = await transaction.cuttingBar.updateMany({
+        where: { id: run.cuttingBarId, status: "LANCEE" },
+        data: { status: "FABRIQUEE", fabricatedAt: finishedAt },
+      });
+      if (changedBar.count !== 1)
+        throw new ConflictException({
+          code: "BAR_CONCURRENT_UPDATE",
+          message: "L’état de la barre a changé.",
+        });
+      const pieceIds = [...new Set(run.cuttingBar.items.map((item) => item.pieceUnit.pieceId))];
+      for (const pieceId of pieceIds) {
+        const pending = await transaction.pieceUnit.count({
+          where: {
+            pieceId,
+            status: { notIn: ["QUALITY_PENDING", "ACCEPTED", "REJECTED", "SCRAPPED"] },
+          },
+        });
+        if (pending === 0) {
+          await transaction.piece.updateMany({
+            where: { id: pieceId, status: { not: "COMPLETED" } },
+            data: { status: "COMPLETED", version: { increment: 1 } },
+          });
+        }
+      }
+      await transaction.historyEvent.createMany({
+        data: [
+          {
+            eventType: "BAR_PRODUCTION_COMPLETED",
+            entityType: "CUTTING_BAR",
+            entityId: run.cuttingBarId,
+            actorUserId: auth.operator.id,
+            actorRole: "OPERATOR",
+            metadata: {
+              offerId: run.cuttingBar.offerId,
+              productionRunId: run.id,
+              machineId: run.machineId,
+              previousStatus: "LANCEE",
+              newStatus: "FABRIQUEE",
+              finishedAt: finishedAt.toISOString(),
+            },
+          },
+          {
+            eventType: "PRODUCTION_COMPLETED",
+            entityType: "PRODUCTION_RUN",
+            entityId: run.id,
+            actorUserId: auth.operator.id,
+            actorRole: "OPERATOR",
+            metadata: {
+              offerId: run.cuttingBar.offerId,
+              barId: run.cuttingBarId,
+              machineId: run.machineId,
+              machineSessionId: run.machineSessionId,
+              pieceUnitIds: unitIds,
+              finishedAt: finishedAt.toISOString(),
+              openNonConformityCount: run.nonConformities.length,
+            },
+          },
+          ...run.cuttingBar.items.map((item) => ({
+            eventType: "PIECE_PRODUCTION_COMPLETED",
+            entityType: "PIECE_UNIT",
+            entityId: item.pieceUnitId,
+            actorUserId: auth.operator.id,
+            actorRole: "OPERATOR" as const,
+            metadata: {
+              offerId: run.cuttingBar.offerId,
+              barId: run.cuttingBarId,
+              productionRunId: run.id,
+              previousStatus: "LANCEE",
+              newStatus: "FABRIQUEE",
+            },
+          })),
+        ],
+      });
+      await transaction.user.update({
+        where: { id: auth.operator.id },
+        data: { lastLoginAt: finishedAt },
+      });
+      return { offerId: run.cuttingBar.offerId, barId: run.cuttingBarId, finishedAt };
+    });
+    this.realtime.publish({
+      type: "production.completed",
+      entityType: "PRODUCTION_RUN",
+      entityId: runId,
+      actorUserId: auth.operator.id,
+    });
+    this.realtime.publish({
+      type: "bar.production.finished",
+      entityType: "CUTTING_BAR",
+      entityId: result.barId,
+      actorUserId: auth.operator.id,
+    });
+    return this.getRun(auth, runId);
+  }
+
+  async reportNonConformity(auth: OperatorAuthContext, runId: string, input: unknown) {
+    const parsed = reportProductionNonConformitySchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Choisissez la pièce et le motif de non-conformité.",
+        details: parsed.error.flatten(),
+      });
+    }
+    let nonConformityId: string;
+    try {
+      nonConformityId = await this.prisma.$transaction(async (transaction) => {
+        const run = await transaction.productionRun.findUnique({
+          where: { id: runId },
+          include: runInclude,
+        });
+        if (!run)
+          throw new NotFoundException({
+            code: "PRODUCTION_RUN_NOT_FOUND",
+            message: "Fabrication introuvable.",
+          });
+        const membership = await transaction.machineSessionOperator.findFirst({
+          where: {
+            machineSessionId: run.machineSessionId,
+            operatorId: auth.operator.id,
+            active: true,
+            machineSession: { status: "ACTIVE" },
+          },
+          select: { id: true },
+        });
+        if (!membership)
+          throw new NotFoundException({
+            code: "PRODUCTION_RUN_NOT_FOUND",
+            message: "Fabrication introuvable.",
+          });
+        if (run.status !== "RUNNING" || run.cuttingBar.status !== "LANCEE") {
+          throw new ConflictException({
+            code: "PRODUCTION_RUN_NOT_RUNNING",
+            message:
+              "Une non-conformité ne peut être déclarée que pendant une fabrication en cours.",
+          });
+        }
+        const item = run.cuttingBar.items.find(
+          (candidate) => candidate.pieceUnitId === parsed.data.pieceUnitId,
+        );
+        if (!item || item.pieceUnit.piece.offerId !== run.cuttingBar.offerId) {
+          throw new NotFoundException({
+            code: "PIECE_NOT_IN_PRODUCTION_BAR",
+            message: "Cette pièce ne fait pas partie de la barre en cours.",
+          });
+        }
+        if (
+          item.pieceUnit.productionStatus !== "LANCEE" ||
+          item.pieceUnit.status !== "IN_PROGRESS"
+        ) {
+          throw new ConflictException({
+            code: "PIECE_NOT_IN_PRODUCTION",
+            message: "Cette pièce n’est pas en cours de fabrication.",
+          });
+        }
+        if (run.nonConformities.some((issue) => issue.pieceUnitId === item.pieceUnitId)) {
+          throw new ConflictException({
+            code: "OPEN_NON_CONFORMITY_EXISTS",
+            message: "Une non-conformité ouverte existe déjà pour cette pièce.",
+          });
+        }
+        const existingOpenIssue = await transaction.nonConformity.findFirst({
+          where: { pieceUnitId: item.pieceUnitId, status: "OPEN" },
+          select: { id: true },
+        });
+        if (existingOpenIssue) {
+          throw new ConflictException({
+            code: "OPEN_NON_CONFORMITY_EXISTS",
+            message: "Une non-conformité ouverte existe déjà pour cette pièce.",
+          });
+        }
+        const row = await transaction.nonConformity.create({
+          data: {
+            offerId: run.cuttingBar.offerId,
+            pieceId: item.pieceUnit.pieceId,
+            pieceUnitId: item.pieceUnitId,
+            cuttingBarId: run.cuttingBarId,
+            machineId: run.machineId,
+            productionRunId: run.id,
+            reportedByOperatorId: auth.operator.id,
+            reason: parsed.data.reason,
+            comment: parsed.data.comment || null,
+          },
+        });
+        const unitChanged = await transaction.pieceUnit.updateMany({
+          where: { id: item.pieceUnitId, productionStatus: "LANCEE", status: "IN_PROGRESS" },
+          data: { qualityStatus: "NON_CONFORME", version: { increment: 1 } },
+        });
+        if (unitChanged.count !== 1)
+          throw new ConflictException({
+            code: "PIECE_PRODUCTION_CONCURRENT_UPDATE",
+            message: "La pièce vient de changer d’état.",
+          });
+        await transaction.cuttingBar.updateMany({
+          where: { id: run.cuttingBarId, status: "LANCEE" },
+          data: { qualityStatus: "NON_CONFORME" },
+        });
+        await transaction.historyEvent.create({
+          data: {
+            eventType: "NON_CONFORMITY_REPORTED",
+            entityType: "NON_CONFORMITY",
+            entityId: row.id,
+            actorUserId: auth.operator.id,
+            actorRole: "OPERATOR",
+            metadata: {
+              offerId: run.cuttingBar.offerId,
+              pieceId: item.pieceUnit.pieceId,
+              pieceUnitId: item.pieceUnitId,
+              barId: run.cuttingBarId,
+              machineId: run.machineId,
+              machineSessionId: run.machineSessionId,
+              productionRunId: run.id,
+              reason: row.reason,
+              previousQualityStatus: item.pieceUnit.qualityStatus,
+              newQualityStatus: "NON_CONFORME",
+            },
+          },
+        });
+        await transaction.user.update({
+          where: { id: auth.operator.id },
+          data: { lastLoginAt: new Date() },
+        });
+        return row.id;
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw new ConflictException({
+          code: "OPEN_NON_CONFORMITY_EXISTS",
+          message: "Une non-conformité ouverte existe déjà pour cette pièce.",
+        });
+      }
+      throw error;
+    }
+    this.realtime.publish({
+      type: "quality.nonConformityReported",
+      entityType: "NON_CONFORMITY",
+      entityId: nonConformityId,
+      actorUserId: auth.operator.id,
+    });
+    const row = await this.prisma.nonConformity.findUnique({
+      where: { id: nonConformityId },
+      include: nonConformityInclude,
+    });
+    if (!row)
+      throw new NotFoundException({
+        code: "NON_CONFORMITY_NOT_FOUND",
+        message: "La non-conformité créée est introuvable.",
+      });
+    return { nonConformity: toNonConformity(row) };
+  }
+
+  async getProductionMonitor(input: unknown) {
+    const parsed = productionMonitorQuerySchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Les filtres de production sont invalides.",
+        details: parsed.error.flatten(),
+      });
+    }
+    if (parsed.data.offerId) {
+      const offer = await this.prisma.offer.findUnique({
+        where: { id: parsed.data.offerId },
+        select: { id: true },
+      });
+      if (!offer)
+        throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
+    }
+    const bars = await this.prisma.cuttingBar.findMany({
+      where: {
+        status: { not: "CANCELLED" },
+        ...(parsed.data.offerId ? { offerId: parsed.data.offerId } : {}),
+        ...(parsed.data.status ? { status: parsed.data.status } : {}),
+        ...(parsed.data.machineId
+          ? { assignments: { some: { machineId: parsed.data.machineId, active: true } } }
+          : {}),
+      },
+      include: {
+        ...barInclude,
+        productionRuns: {
+          orderBy: { startedAt: "desc" },
+          take: 1,
+          include: {
+            machine: { select: machineSelect },
+            machineSession: { include: sessionInclude },
+            startedByOperator: { select: operatorSelect },
+            nonConformities: {
+              where: { status: "OPEN" },
+              include: nonConformityInclude,
+              orderBy: { reportedAt: "desc" },
+            },
+            cuttingBar: { include: barInclude },
+          },
+        },
+      },
+      orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+      take: 500,
+    });
+    const machineIds = [
+      ...new Set(bars.flatMap((bar) => bar.assignments.map((assignment) => assignment.machineId))),
+    ];
+    const activeSessions = machineIds.length
+      ? await this.prisma.machineSession.findMany({
+          where: { machineId: { in: machineIds }, status: "ACTIVE" },
+          include: sessionInclude,
+        })
+      : [];
+    const sessionsByMachine = new Map(
+      activeSessions.map((session) => [session.machineId, session]),
+    );
+    const monitorBars: ProductionMonitorBar[] = bars.map((bar) => {
+      const lastRun = bar.productionRuns[0];
+      const activeAssignment = bar.assignments[0];
+      const session =
+        lastRun?.machineSession ??
+        (activeAssignment ? sessionsByMachine.get(activeAssignment.machineId) : undefined);
+      return {
+        bar: toBar(bar),
+        machineSession: session ? toSession(session, session.status === "ACTIVE") : null,
+        run: lastRun ? toRunSummary(lastRun) : null,
+        openNonConformities: bar.nonConformities.map(toNonConformity),
+      };
+    });
+    return {
+      bars: monitorBars,
+      counts: {
+        shaped: monitorBars.filter(({ bar }) => bar.status === "FACONNEE").length,
+        assigned: monitorBars.filter(({ bar }) => bar.status === "AFFECTEE").length,
+        inProgress: monitorBars.filter(({ bar }) => bar.status === "LANCEE").length,
+        fabricated: monitorBars.filter(({ bar }) => bar.status === "FABRIQUEE").length,
+        openNonConformities: monitorBars.reduce(
+          (sum, item) => sum + item.openNonConformities.length,
+          0,
+        ),
+      },
+    };
+  }
+
+  async listOpenNonConformities(input: unknown) {
+    const parsed = productionMonitorQuerySchema.safeParse(input);
+    if (!parsed.success)
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Les filtres sont invalides.",
+        details: parsed.error.flatten(),
+      });
+    if (
+      parsed.data.offerId &&
+      !(await this.prisma.offer.findUnique({
+        where: { id: parsed.data.offerId },
+        select: { id: true },
+      }))
+    ) {
+      throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
+    }
+    const rows = await this.prisma.nonConformity.findMany({
+      where: {
+        status: "OPEN",
+        ...(parsed.data.offerId ? { offerId: parsed.data.offerId } : {}),
+        ...(parsed.data.machineId ? { machineId: parsed.data.machineId } : {}),
+      },
+      include: nonConformityInclude,
+      orderBy: { reportedAt: "desc" },
+      take: 500,
+    });
+    return { nonConformities: rows.map(toNonConformity) };
+  }
+}
