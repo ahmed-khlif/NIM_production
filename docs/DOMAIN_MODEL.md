@@ -2,7 +2,7 @@
 
 ## User
 
-`id, username, displayName, passwordHash, role, isActive, disabledAt?, lastLoginAt?, tabletAccessEnabled, connectionKeyId?, connectionKeyHash?, createdAt, updatedAt`
+`id, username, displayName, passwordHash, role, isActive, disabledAt?, lastLoginAt?, tabletAccessEnabled, createdAt, updatedAt`. Tablet auth uses the User's existing username and password hash.
 
 `OPERATOR` is a role on this same User record, not a separate person/profile table. Tablet credentials and tablet auth sessions are additional authentication data for the User; production and history references use `User.id`.
 
@@ -39,6 +39,6 @@ The current phase stores one unit-level decision per PieceUnit. `CONFORM` moves 
 
 Append-oriented: `id, eventType, pieceId?, pieceUnitId?, machineId?, actorUserId?, oldStatus?, newStatus?, metadata, timestamp`
 
-## ImportBatch
+## Notification
 
-`id, filename, status, rowsTotal, rowsCreated, rowsRejected, errors?, createdBy, createdAt, completedAt?`. A committed CSV, Tekla `.xls`, or `.xlsx` batch is immutable from the application surface and is linked to its `PIECE_IMPORTED` history events. Preview remains non-persistent.
+Recipient-specific inbox row: `id, recipientUserId, sourceEventId?, eventType, title, message, href, actorName?, offerId?, entityType?, entityId?, readAt?, createdAt`. It is created in the same database transaction as its source business change, is deduplicated per source event and recipient, and never replaces or deletes `HistoryEvent`. Read state is personal to the recipient. Old history is not synthesized into notifications. Operators are targeted through their current active `MachineSession` membership, not a permanent machine assignment; administrators and production managers receive relevant global work changes because the current model has no manager-to-Affaire assignment.

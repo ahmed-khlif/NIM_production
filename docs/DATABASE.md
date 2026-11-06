@@ -10,6 +10,12 @@
 
 ## Authentication persistence
 
+## Material profile catalogue
+
+`MaterialProfile` stores the canonical profile designation, aliases, line weight (`kgPerMeter`), available raw lengths in millimetres, active state, and update timestamps. The designation is the catalogue identity; aliases support recognition of alternate names. There is no separate catalogue reference field. Profiles are retained and deactivated instead of deleted. Admin create/update changes write an append-only `HistoryEvent` in the same transaction.
+
+Piece unit weight defaults to the rounded result `kgPerMeter × lengthMm / 1000`; an explicit manual override is preserved. Piece total weight remains unit weight × quantity.
+
 The current Prisma migrations add `User`, `Session`, `Machine`, `Piece`, `PieceUnit`, `Assignment`, `ProductionOperation`, `QualityControl`, and `HistoryEvent`.
 
 - `User` stores username, display name, role, active state, optional disabled timestamp, Argon2id password hash, and login timestamp.
@@ -17,7 +23,6 @@ The current Prisma migrations add `User`, `Session`, `Machine`, `Piece`, `PieceU
 - `HistoryEvent` is append-only application history. It stores both `actorUserId` and an `actorRole` snapshot. Its actor relation uses `SetNull`, so removing a user never removes the audit trail.
 - `Machine` stores a unique internal number, type, status, location and description. Its status is constrained to `ACTIVE`, `MAINTENANCE`, or `INACTIVE`.
 - `Piece` stores the immutable production reference, requested quantity, exact profile, quality, length in millimetres, optional unit weight, imported total weight, designation, priority, due date, workflow status, creator, and a version counter. `totalWeightKg` preserves the Tekla source value; manual creation and edits calculate it from unit weight and quantity on the server.
-- `ImportBatch` stores each committed CSV/Tekla/Excel batch, row counts, warning metadata, creator, and completion timestamp. Preview is non-persistent; commit creates the batch, pieces, units, and audit events transactionally.
 - `PieceUnit` stores one traceable unit per requested quantity with a unique `(pieceId, sequenceNumber)`, current status, optional current machine/operator references, and production/quality timestamps. Operators are nullable and are never permanently attached to machines.
 - `PieceImage` stores authenticated piece-photo metadata (`storageKey`, original name, MIME type, byte size, order, uploader, and timestamp). Image bytes stay in `MEDIA_ROOT`; PostgreSQL stores the reference and audit-relevant metadata, not the binary.
 - `Assignment` stores one historical machine assignment for a PieceUnit. Reassignment closes the previous row and creates a new row; a partial unique PostgreSQL index allows only one active assignment per PieceUnit while preserving unlimited inactive history.
@@ -49,3 +54,15 @@ Key constraints/indexes:
 Prefer archive/deactivate instead of hard-delete for audited entities.
 
 Phase 2 adds tablet credentials and `TabletAuthSession` to the existing `User` model, plus `MachineSession`, `MachineSessionOperator`, `ProductionRun`, and `NonConformity`. There is no active `Operator` account model: account identity, machine-team membership, production runs, piece traceability, and history all reference the same User ID. The legacy `Operator` and `OperatorAuthSession` tables are copied into `LegacyOperatorArchive` and `LegacyOperatorAuthSessionArchive` by migration `20261015170000_use_existing_operator_users`; uniquely name-matched profiles and their history are linked to existing OPERATOR users, while unmatched profiles without linked activity remain preserved in the archive for manual reconciliation. The migration aborts rather than guessing when names are ambiguous or an unmatched profile owns production history/session data. Connection secrets use Argon2id hashes; opaque tablet sessions use keyed token hashes. Partial unique indexes protect active machine/operator sessions, running runs, and open non-conformities. Migration `20261015143000_operators_tablet_production` adds and backfills production/quality statuses without deleting production records.
+
+Migration `20261020100000_operator_email_password_login` drops obsolete User/legacy-archive tablet connection-key hashes and lookup IDs while preserving accounts, password hashes, tablet sessions, production records, and audit history. The follow-up migration `20261020110000_operator_username_password_login` removes the unused email column. Tablet login verifies the existing User username and password hash; see [Operator account access and production roles](OPERATOR_ACCOUNT_ACCESS.md).
+
+### Query and compute efficiency
+
+The dashboard calculates status, due-date, quality, and daily production/quality trend aggregates in one parameterized PostgreSQL query (UTC buckets for trend dates). Its aggregate snapshot is cached in-process for up to three seconds and invalidated by committed realtime domain events; high-detail piece rows, machine queue counts, and recent activity remain independently queried. Machine queue projections use filtered relation counts, and dashboard piece rows use filtered unit counts plus only the current machine label instead of loading every PieceUnit. Offer list metrics aggregate piece counts and quantities by `(offerId, profile)` and manufactured-unit totals by offer; plan precedence is resolved with a ranked query, then only validated proposals for partially validated selected plans are counted. Piece filter facets are served by a separate parameterized query and are requested lazily when the filter/form is opened, not for every page. Existing domain indexes are retained; no speculative index migration was added without representative `EXPLAIN (ANALYZE, BUFFERS)` evidence. Cutting-plan optimization is isolated from the API event loop in a small bounded worker-thread executor; worker saturation queues requests rather than creating unbounded solver threads.
+
+# Client directory
+
+`Client` stores the reusable legal name, normalized unique name key, optional normalized unique fiscal identifier, up to three phone values, up to two e-mail values, optional image storage key, archive timestamp, creator, and timestamps. Image bytes stay in `MEDIA_ROOT`; database changes and photo replacement are recorded in append-only `HistoryEvent` rows. Client records are archived, never hard-deleted.
+
+`Offer.clientId` references `Client` with a restrictive foreign key. `Offer.clientName` remains as a denormalized compatibility/display snapshot; the relation is authoritative for selection. Migration `20261101100000_client_directory` converts distinct existing non-empty client names to records and backfills their Offer links.

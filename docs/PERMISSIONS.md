@@ -2,7 +2,9 @@
 
 Roles: ADMIN, PRODUCTION_MANAGER, OPERATOR, QUALITY_CONTROLLER.
 
-Key permissions: USERS_READ/CREATE/UPDATE/DISABLE, MACHINES_READ/CREATE/UPDATE/MAINTENANCE, PIECES_READ/CREATE/UPDATE/IMPORT, ASSIGNMENTS_READ/CREATE/REASSIGN, PRODUCTION_START/PROGRESS/COMPLETE, QUALITY_READ/VALIDATE, HISTORY_READ, DASHBOARD_READ.
+Key permissions: USERS_READ/CREATE/UPDATE/DISABLE, MACHINES_READ/CREATE/UPDATE/DELETE/MAINTENANCE, PIECES_READ/CREATE/UPDATE/IMPORT, ASSIGNMENTS_READ/CREATE/REASSIGN, PRODUCTION_START/PROGRESS/COMPLETE, QUALITY_READ/VALIDATE, HISTORY_READ, DASHBOARD_READ.
+
+Machine deletion is available to `ADMIN` and `PRODUCTION_MANAGER` only when no operational record references the machine. Machines with production or assignment history must be deactivated instead; the API preserves the machine record and its traceability.
 
 ## Typical ownership
 
@@ -10,6 +12,8 @@ Key permissions: USERS_READ/CREATE/UPDATE/DISABLE, MACHINES_READ/CREATE/UPDATE/M
 - Production Manager: pieces, imports, assignments, dashboard, production/history reads.
 - Operator: machine read, assigned queue read, production start/progress/complete.
 - Quality Controller: pending quality read and validation.
+
+Only `ADMIN` may use `PATCH /offers/:id/status` to override an active Affaire status. The override cannot set `ARCHIVED`; it records an append-only history event and does not undo production or quality facts. Production managers continue to use the normal guarded lifecycle.
 
 Frontend hiding is convenience only; NestJS guards enforce permissions.
 
@@ -21,7 +25,7 @@ Administrators cannot disable themselves, remove their own last admin role, disa
 
 Machine reads are available to every authenticated role. Creating, editing, or changing machine status is restricted server-side to `ADMIN` and `PRODUCTION_MANAGER`. Machine status changes are recorded as `MACHINE_STATUS_CHANGED` events.
 
-Piece reads are available to every authenticated role. Creating, editing, or archiving pieces is restricted server-side to `ADMIN` and `PRODUCTION_MANAGER`. Creating a piece also creates all of its `PieceUnit` records transactionally; piece mutations record actor and role snapshots in history. Operators and quality controllers can see the planning data but cannot change it.
+Piece reads are available to every authenticated role. Creating, editing, archiving, or deleting unused pieces is restricted server-side to `ADMIN` and `PRODUCTION_MANAGER`. Bulk deletion is available on non-archived Affaires and only for pieces whose units remain pending and have never been linked to assignment, cutting, production, or quality records. Deletion removes the piece and its unused units/photos, while a permanent `PIECE_DELETED` history event retains the reference and key business details. Creating a piece also creates all of its `PieceUnit` records transactionally; piece mutations record actor and role snapshots in history. Operators and quality controllers can see the planning data but cannot change it.
 
 Piece images follow the same boundary: every authenticated role can view an image through the guarded stream route, while only `ADMIN` and `PRODUCTION_MANAGER` can upload or remove images. Archived pieces are read-only, including their gallery. Removing a file never removes the corresponding history event.
 
@@ -35,7 +39,7 @@ Production queue reads and start/complete transitions are restricted server-side
 
 ## Operator management and tablet
 
-ADMIN and PRODUCTION_MANAGER can manage tablet keys/access for an existing `User` with role `OPERATOR` and read the production monitor; they cannot create a parallel operator profile. QUALITY_CONTROLLER may read open tablet non-conformities. The tablet connection key and HttpOnly cookie provide a separate authentication mechanism for the same User ID, not a separate identity. Operator-only routes may list active machines/helpers and act only within the caller's active MachineSession. They may start/finish that session's assigned bar and report an NC on a PieceUnit in its current run. Operators cannot manage Offers, Pieces, Faconnage, Machines, assignments, or other user accounts. All these checks are enforced by API guards and domain services, not the UI.
+ADMIN and PRODUCTION_MANAGER can manage tablet access for an existing `User` with role `OPERATOR`; they cannot create a parallel operator profile. Only ADMIN can reset the normal User password. Operators authenticate to the tablet with their existing username/password and cannot change their password themselves. ADMIN can read the global production monitor; PRODUCTION_MANAGER must scope monitor access to an Affaire whose status is `IN_PRODUCTION`. QUALITY_CONTROLLER may read open tablet non-conformities. Operator-only routes may list active machines/helpers and act only within the caller's active MachineSession. They may start/finish that session's assigned bar and report an NC on a PieceUnit in its current run. Operators cannot manage Offers, Pieces, Faconnage, Machines, assignments, or other user accounts. All these checks are enforced by API guards and domain services, not the UI.
 
 ## Implemented quality control
 
@@ -49,4 +53,10 @@ The history reader is restricted server-side to `ADMIN` and `PRODUCTION_MANAGER`
 
 Dashboard reads are restricted server-side to `ADMIN` and `PRODUCTION_MANAGER`. Metrics are calculated from persisted pieces, piece units, machines, production operations, due dates, and append-only history events.
 
-Settings reads and updates are scoped to the authenticated user and write `SETTINGS_UPDATED` events. Notifications are scoped server-side: managers/admins receive recent non-auth activity, while operators and quality controllers receive their own recent activity. Neither surface broadens access to production records.
+Settings reads and updates are scoped to the authenticated user and write `SETTINGS_UPDATED` events. Notifications are durable recipient-owned rows: reads, unread counts, mark-one-read, and mark-all-read are always filtered by the authenticated `recipientUserId`. Admins and production managers receive relevant operational changes across the current global workspace; quality controllers receive inspection/NC work; operators receive updates for the active machine session and their account/tablet access. The API stores only the notification copy and safe internal workflow link, and does not grant access to the linked resource: destination routes still enforce their normal guards and affaire scope. Read state never mutates or removes append-only history.
+
+Current operator credential and production visibility rules are documented in [Operator account access and production roles](OPERATOR_ACCOUNT_ACCESS.md). Operator passwords are administrator-managed; operator self-service password changes are rejected by the API. Admins have global production-monitor access; production managers can access it only with an Affaire scope.
+
+# Client directory permissions
+
+Client-directory reads, creation, edits, and photo replacement are limited to `ADMIN` and `PRODUCTION_MANAGER`, matching their authority to manage Affaires. Only `ADMIN` may archive or restore a client. Archived clients remain readable through existing Affaire references but are excluded from new Affaire selection. NestJS enforces these rules; hidden controls are not the security boundary.

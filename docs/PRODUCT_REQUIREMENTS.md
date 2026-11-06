@@ -63,3 +63,15 @@ Global progress, in-production count, delayed pieces, active machines, maintenan
 ## Non-functional
 
 Responsive touch UI, common operator actions in 1-2 touches, realtime without refresh, target page load under about 3s on workshop network, offline support later.
+
+# Façonnage input and revision behavior
+
+For each selected exact profile, managers may configure several raw lengths and optionally enter a maximum count available for each length. Blank count means no cap; zero means that length is unavailable. These counts constrain only the current optimization and do not create, decrement, reserve, or otherwise represent inventory.
+
+A persisted fully validated plan may be revised only before production begins and only while all its generated bars remain unassigned. The operation cancels those bars and their proposals, releases their piece units to pending, returns a READY offer to DRAFT, and records an audit event. Assigned or started bars must be explicitly unassigned first; production history remains immutable.
+
+Profile-family context is loaded from the selected detailed profiles in the existing profile catalog and shown on each optimization card. A separate Canon/template entity does not currently exist, so optimization must not invent or persist Canon data until that domain is specified.
+
+# Shared client records
+
+Affaires select a reusable client record instead of creating an unrelated free-text name. Creating a client requires its legal name, fiscal identifier, one telephone number, and one e-mail address; up to two additional telephone numbers and one additional e-mail address are optional. A client may also have an optional image. Authorized staff can search, update, archive/restore, and export a print-ready PDF profile. Archival preserves every existing Affaire association.

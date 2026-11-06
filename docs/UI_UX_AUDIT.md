@@ -7,7 +7,7 @@
 
 The platform has a coherent industrial visual direction and a useful domain flow: offers contain pieces, pieces become unit-level work, units are assigned to machines, production is executed, and quality/history preserve the result. The strongest UX risks are systemic rather than decorative: several operational lists load all rows (or stop at a fixed cap) instead of using a consistent server pagination contract; most filters live only in component state; and authenticated mobile/tablet coverage has been limited.
 
-This audit applies a cross-platform interaction baseline to shared controls: buttons, inputs, selects, menu items, and tabs now meet the project's 44px minimum target; focus rings are more visible; buttons provide restrained pressed feedback; and the global-search label now accurately says that it searches offers. Existing loading, empty, and error patterns are preserved. The changes deliberately avoid page-by-page restyling without evidence of a workflow defect.
+This audit applies a cross-platform interaction baseline to shared controls: buttons, inputs, selects, menu items, and tabs now meet the project's 44px minimum target; focus rings are more visible; and buttons provide restrained pressed feedback. The shared header's search icon opens a compact search field beneath it; submitting opens a dedicated results page across Affaires, pieces, machines, and production bars, with role-scoped results, loading/partial-error/empty feedback, pagination, and direct navigation to each match. Existing loading, empty, and error patterns are preserved.
 
 ## Phase 1 — Structural audit
 
@@ -16,20 +16,20 @@ This audit applies a cross-platform interaction baseline to shared controls: but
 - The app shell has role-aware navigation, a mobile navigation sheet, keyboard-accessible quick navigation, notification access, and account actions.
 - The offer workspace organizes related sections (overview, pieces, faconnage, bars, assignments, production, and quality) under the selected offer. This keeps the domain context visible and is preferable to duplicating a separate operator directory: operator identities are existing `User` records with the `OPERATOR` role.
 - The manager path is understandable, but the overall workflow does not yet communicate one persistent “next action” across every offer state. A future workflow/status panel should derive the next valid action from server state and permissions, rather than duplicating transition rules in React.
-- Search in the shared header is offer search, not universal search. The accessible label has been corrected to avoid promising more than it does.
+- Global search requests were previously limited to Affaires and retained their input after route changes. The header now submits to a dedicated full results page that searches multiple workspace entities through their existing paginated API queries.
 
 ### Lists, pagination, and data handling
 
-| Area                            | Current behavior                                                                     | UX / scale impact                                                                             | Priority |
-| ------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- | -------- |
-| History                         | Validated server-side page and page-size contract                                    | Good baseline; reuse this contract                                                            | —        |
-| Pieces                          | API returns the full offer's pieces; UI filters and paginates in memory              | Payload and render cost grow with the offer; page controls do not reduce server work          | P1       |
-| Assignments                     | Active assignments and assignable units are fetched as full collections              | Large queues become slow and difficult to scan                                                | P1       |
-| Pending quality                 | All pending units returned; quality history capped to latest 100                     | Pending queue can grow without bound; older history is silently unavailable through this list | P1       |
-| Machines                        | Full machine directory returned                                                      | Usually a smaller collection, but has no consistent contract as installations grow            | P2       |
-| Cutting bars / bar assignments  | Offer-scoped collections returned without paging                                     | Large jobs can produce heavy responses and long tables                                        | P1       |
-| Offers                          | API applies search but returns at most 250 rows; client handles additional filtering | Results beyond the cap are inaccessible, with no page metadata explaining the limit           | P1       |
-| Notifications / recent activity | Fixed recent-event limits                                                            | Suitable for previews, but should link to complete paginated history                          | P2       |
+| Area                            | Current behavior                                                                     | UX / scale impact                                                                                        | Priority |
+| ------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | -------- |
+| History                         | Validated server-side page and page-size contract                                    | Good baseline; reuse this contract                                                                       | —        |
+| Pieces                          | API returns the full offer's pieces; UI filters and paginates in memory              | Payload and render cost grow with the offer; page controls do not reduce server work                     | P1       |
+| Assignments                     | Active assignments and assignable units are fetched as full collections              | Large queues become slow and difficult to scan                                                           | P1       |
+| Pending quality                 | All pending units returned; quality history capped to latest 100                     | Pending queue can grow without bound; older history is silently unavailable through this list            | P1       |
+| Machines                        | Full machine directory returned                                                      | Usually a smaller collection, but has no consistent contract as installations grow                       | P2       |
+| Cutting bars / bar assignments  | Offer-scoped collections returned without paging                                     | Large jobs can produce heavy responses and long tables                                                   | P1       |
+| Offers                          | API applies search but returns at most 250 rows; client handles additional filtering | Results beyond the cap are inaccessible, with no page metadata explaining the limit                      | P1       |
+| Notifications / recent activity | Previously projected activity rather than an owned inbox                             | Replaced on 2026-10-23 by recipient-targeted notifications, persistent read state, and a paginated inbox | Resolved |
 
 **Required next step:** define one validated list response (`items`, `page`, `pageSize`, `total`, `totalPages`) and apply server-side filtering, stable sorting, and pagination. Start with pieces, pending quality, assignments/available units, and bars; then migrate offers and the remaining directories. Use cursor pagination for very large append-heavy histories if measurements justify it. Do not add only client-side pagination to a full response.
 
@@ -52,7 +52,7 @@ This audit applies a cross-platform interaction baseline to shared controls: but
 
 - Raised shared button, input, select, tab, and dropdown-menu action targets to the 44px minimum.
 - Improved keyboard focus ring visibility and added a small pressed-state response to buttons.
-- Corrected the app-header search accessible name to match its offer-search behavior.
+- Replaced the offer-only header field with a search form that opens a dedicated app-wide results page for Affaires, pieces, machines, and production bars. Results use existing authorized server search endpoints and navigate directly to the matching record; the submitted query is scoped to `/search` and does not carry into other pages.
 - Added a shared component regression test for button, icon-button, and input touch-target sizing.
 - Added browser viewport coverage for primary authenticated pages at common phone and tablet widths.
 
@@ -86,6 +86,12 @@ These are shared improvements applied across routes, not a claim that every indi
 6. Measure API response size, list query latency, and frontend render time before selecting page sizes or introducing virtualization. Virtualize only when paged results still need it.
 
 ## Verification record
+
+### Table scanning consistency — 2026-10-29
+
+- All manager data tables now expose a consistent neutral sort indicator in every column header, with sticky headers, clearer alignment, and improved hover contrast.
+- Interactive sorting uses the shared shadcn/TanStack `DataTable`; server-paginated lists do not pretend to sort only the current page.
+- Material-profile catalogue and import preview tables now use the same data-table treatment as operational lists.
 
 The shared UI component tests and targeted browser tests are run for this audit. Full lint, typecheck, test, E2E typecheck/lint, and production build results are recorded at handoff; browser coverage is limited to the route and viewport set described above.
 
@@ -151,3 +157,70 @@ The shared UI component tests and targeted browser tests are run for this audit.
 - Reduced Offer detail summary work: piece counts/quantities/profiles now use database aggregation, manufactured units use a count query, and plan summaries are bounded to five recent rows. This avoids loading every PieceUnit solely to calculate the summary while preserving plan precedence and normalized profile counting.
 - No numeric LCP improvement is claimed until measured against a production build with a repeatable browser trace and representative Offer data. The authenticated page walkthrough should confirm the Offer detail and Pieces paths still render correctly.
 - Faconnage optimization still solves before opening its write transaction. Its atomic availability check, plan/proposal writes, and audit event now use a 30-second Prisma transaction timeout (10-second acquisition wait), addressing the reported expiry at approximately 5 seconds without moving solver work into the transaction.
+
+### Database pagination and durable list context — 2026-10-17
+
+- Main operational directories now use server-side filtering and bounded database pagination, including Offers, pieces, bars, assignments, notifications/history, users, machines, quality queues, the tablet queue, planning's visible date range, and production monitoring. Machine detail bars and its unit queue were also bounded; machine-wide metrics and the currently running job stay independent of the selected page.
+- Offers, Machines, Users, Activity, Offer bars/assignments/production monitoring, Quality queues/history, the operator tablet queue, and the global History list now keep their relevant search/filter/page/page-size state in the URL. Refresh and shared links restore list context, browser back/forward updates controls, and unrelated query parameters are preserved. Temporary selections and dialog state remain local.
+- Added regression tests for the shared URL-state helper and prior machine/notification pagination changes. Current full-suite counts: API 120 tests and web 55 tests; no production-sized latency or LCP claim is made without representative data and a browser trace.
+- Remaining: exercise complete operator/quality role journeys at phone/tablet sizes; measure real PostgreSQL query plans and response/render times before adding speculative indexes or virtualization; verify light/dark and keyboard behavior across route families.
+
+### Dashboard metric hierarchy and analytics clarity — 2026-10-17
+
+- Reframed the dashboard around five workshop decisions: fabrication progress, units currently in progress, overdue pieces, open workshop non-conformities, and active/maintenance machine counts. Removed the repeated KPI wall and the secondary “day context” card so priority actions, active flow, exceptions, and analytics are easier to scan.
+- Removed the so-called machine utilization metric from the API contract and UI. It divided queued/in-progress counts and was not time- or capacity-based; the dashboard now reports those actual counts explicitly. A service regression assertion protects the contract from reintroducing that misleading field.
+- Replaced generic status/priority donuts with labeled proportional breakdowns and overlapping filled activity areas with daily line trends. Quality conformity and its progress bar are both withheld when there are no completed inspections rather than showing a false 0%; chart gridlines follow the light/dark design tokens.
+- Dashboard trend range is retained in the URL; the displayed update time comes from the query timestamp rather than rendering the current clock as if it were a refresh. Responsive shadcn surfaces and existing API-backed sources are retained.
+- Remaining data opportunity: true machine utilization needs rated capacity, shift calendars/downtime, and persisted operating intervals. Until those data exist, counts are honest and actionable; no utilization KPI or performance improvement is claimed.
+
+### Shared shadcn interaction baseline — 2026-10-19
+
+- Refined the shared page heading used across manager screens: neutral uppercase context label, consistent token-based title/description colors, constrained readable description width, and grouped responsive page actions. NIM red remains reserved for meaningful actions and states rather than repeating as decorative heading color.
+- Updated shared semantic status badges with matching dark-theme surfaces and text contrast without changing status meaning.
+- Made the shared page-size control a 44px touch target and exposed pagination as a named navigation landmark.
+- Added focused component tests for page-heading hierarchy/actions, pagination semantics/touch sizing, and dark-mode status colors. These shared changes improve consistency but do not certify every page visually; role-specific browser review and full light/dark accessibility coverage remain outstanding.
+
+### Layout rhythm and table-style scoping — 2026-10-20
+
+- Adjusted the shared authenticated content gutter to use a consistent 16px phone inset, 24px tablet inset, and 32px wide-screen inset while preserving the 1600px workspace bound.
+- Updated shared page headings so long titles wrap safely and action groups use the available width on phones before returning to content-sized alignment on larger screens.
+- Scoped global zebra rows, hover, cell rhythm, and compact-density rules to explicitly marked operational data tables. This prevents list-table styles from changing nested/preview tables; main data-table screens now opt into `nim-data-table` explicitly.
+- This is a shared structural correction, not a certification that every route has been visually reviewed. Re-run authenticated role journeys and light/dark device screenshots after the current session/login changes settle.
+
+### Application read/cache performance — 2026-10-22
+
+- React Query now uses freshness by domain (short for production/assignment queues, moderate for lists/dashboard, and longer for reference catalogs) and retains inactive route data for ten minutes. Realtime events invalidate affected data families plus shared history/notifications, rather than every active query.
+- Piece facets are served from a separate scoped API route and fetched only when the profile filter or piece form is opened; normal paginated list requests no longer scan distinct values across an entire affair.
+- Dashboard status/due-date/quality/trend aggregates are consolidated into one parameterized PostgreSQL query. The aggregate snapshot is coalesced and cached for at most three seconds, then invalidated by post-commit domain events; piece progress and machine queue fields use counts instead of loading all related rows/IDs.
+- Piece/import and machine mutations publish cache-invalidating realtime events only after their write transactions complete. This also keeps connected clients' React Query views current.
+- Façonnage now assigns generated unit IDs with linear-time pools and performs CPU-heavy optimization in a bounded worker-thread executor, keeping synchronous solver work off the API event loop.
+- Regression tests cover lazy facet query behavior and offer scoping, dashboard aggregation/caching/invalidation, domain-specific client invalidation, and per-domain query freshness. These are code-level improvements, not a claim of measured end-to-end latency gains: capture production-build browser traces and run PostgreSQL `EXPLAIN (ANALYZE, BUFFERS)`/load tests against a representative database before setting performance SLOs or adding more indexes. Dashboard cache/event invalidation is currently per API process; a multi-instance deployment needs shared cache/event infrastructure.
+- `NEXT_DIST_DIR` may point a production build at a separate output directory, allowing build verification without replacing `.next` while a local development server is running.
+
+### Consistent settings controls and touch targets — 2026-10-23
+
+- Replaced the remaining native activity-preference checkbox with the same accessible shadcn-style switch used by the material-profile editor and import-overwrite control. The reusable switch has a clear on/off semantic state, visible keyboard focus, and a minimum 44px hit area.
+- Kept multi-select controls as checkboxes (their semantics are correct) while increasing the family/group selection hit areas in the Façonnage workflows. Individual selection cards already provide a larger label target.
+- The Material Profiles editor remains sticky only in its split desktop catalog layout; dialogs and short single-column forms remain non-sticky to avoid trapping content or obscuring the page. Other list filter bars already use the shared sticky-table pattern.
+- Added a regression test for switch semantics, keyboard-focusable button behavior, and touch sizing. This targeted consistency pass is not a visual certification of every route or role.
+
+### Real notifications, separate from audit history — 2026-10-23
+
+- Added a persisted `Notification` inbox with recipient ownership, source-history linkage, saved French copy/workflow destination, and per-user `readAt`. Notification rows are inserted inside the same transaction as their source business change and are deduplicated by source event and recipient. Existing audit history is intentionally not backfilled.
+- Delivery targets admins and production managers for relevant cross-affaire events (the current model has no manager-to-Affaire assignment), quality controllers for inspection/NC milestones, and operators in the affected active machine session. Account creation and tablet-access changes target the operator directly. Operators remain session-scoped, never permanently attached to a machine.
+- Replaced the previous HistoryEvent projection with recipient-scoped inbox endpoints, unread count, mark-one-read, mark-all-read, server-side search/type/unread filters, and ownership checks. The unread count is independent of filters and always restricted to the authenticated user.
+- The header bell now shows an unread count and actionable recent items; the inbox provides an unread filter, individual acknowledgement, bulk acknowledgement, pagination, retry/loading/empty states, and contextual links. The settings switch only hides/shows the badge; it never opts the user out of delivery.
+- History remains the all-time, append-only audit journal. The new inbox is a task-oriented delivery surface, not another activity timeline. Role/destination pages continue enforcing their own guards.
+- API regression coverage checks targeted fan-out, self-notification suppression, active session scoping, recipient isolation, unread count, and read acknowledgements. Run the new Prisma migration before the updated API starts; live database/browser verification remains required after migration because the local development API currently holds Prisma’s Windows query-engine DLL open.
+
+# Client and Affaire linking
+
+The Affaire form previously accepted unrelated free-typed client names, which fragmented filtering and made client contact data impossible to maintain. It now uses the paginated client directory and offers a small inline create path. Full contact and photo management stays on the dedicated client detail screen. Search, archive state, selected-client persistence, and audit links are server-backed; the profile's print stylesheet supports Save as PDF without exposing internal IDs.
+
+### Shared responsive pass — 2026-11-02
+
+- Reduced horizontal overflow risk in the shared application shell by allowing the main content region to shrink inside the sidebar layout.
+- Right-side form sheets now use nearly the full phone width while retaining a bounded desktop width; left navigation sheets remain narrower. Centered dialogs keep a consistent 16px viewport gutter on phones.
+- Shared sheet and dialog tests cover these responsive width contracts. Existing route-level browser coverage checks the primary authenticated pages at 375px and 768px; offer-specific workflows and operator tablet states still need separate visual walkthroughs.
+- Browser verification now walks the primary authenticated pages—including clients, global search, profile catalogue, and a machine detail—at 375px and 768px. The Offer workspace checks all nine tabs at both widths. The walkthrough exposed a login illustration overlay that intercepted the submit click; the decorative panel is now pointer-inert and covered by a regression test. E2E navigation labels were updated to the current Affaire terminology.
+- Updated the piece-list and Tekla-import labels from “Offre” to “Affaire” so the screen copy matches the workspace navigation and current business terminology.
