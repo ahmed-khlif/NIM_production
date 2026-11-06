@@ -1,6 +1,8 @@
 node_modules
 .next
+apps/web/.next-production
 apps/web/.next-dev
+apps/web/.next-performance-check
 dist
 coverage
 test-results
@@ -11,3 +13,5 @@ playwright-report
 !.env.example
 prisma/dev.db
 apps/api/storage
+
+apps/web/.next-global-search-verify

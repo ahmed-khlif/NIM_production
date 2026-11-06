@@ -48,7 +48,7 @@ test("captures every manager route in the persisted Offer workspace", async ({ p
       waitUntil: "domcontentloaded",
     });
     expect(response?.status(), `${route.path || "/"} should render`).toBe(200);
-    const offerNav = page.getByRole("navigation", { name: "Navigation de l’offre" });
+    const offerNav = page.getByRole("navigation", { name: "Navigation de l’affaire" });
     await expect(offerNav).toBeVisible();
     await expect(
       offerNav.getByRole("link", { name: route.activeTab, exact: true }),
@@ -60,30 +60,45 @@ test("captures every manager route in the persisted Offer workspace", async ({ p
   expect(apiFailures).toEqual([]);
 });
 
-test("keeps Offer workspaces usable at phone width", async ({ page }) => {
-  test.setTimeout(90_000);
+test("keeps Offer workspaces usable at phone and tablet widths", async ({ page }) => {
+  test.setTimeout(180_000);
   await mkdir(screenshotDirectory, { recursive: true });
   await loginAsAdmin(page);
   const offerId = await firstOpenOffer(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-
-  for (const route of [
-    { path: "/pieces", tab: "Pièces", screenshot: "offer-pieces-390.png" },
-    { path: "/faconnage", tab: "Façonnage", screenshot: "offer-faconnage-390.png" },
-    { path: "/bar-assignments", tab: "Affectations", screenshot: "offer-assignments-390.png" },
-    { path: "/production", tab: "Production", screenshot: "offer-production-390.png" },
-  ]) {
-    await page.goto(`/offers/${offerId}${route.path}`, { waitUntil: "domcontentloaded" });
-    const offerNav = page.getByRole("navigation", { name: "Navigation de l’offre" });
-    await expect(offerNav.getByRole("link", { name: route.tab, exact: true })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    const documentWidth = await page.evaluate(() =>
-      Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
-    );
-    expect(documentWidth, `${route.path} must not overflow at 390px`).toBeLessThanOrEqual(390);
-    await page.screenshot({ path: join(screenshotDirectory, route.screenshot) });
+  const routes = [
+    { path: "", tab: "Vue générale" },
+    { path: "/pieces", tab: "Pièces" },
+    { path: "/pieces/import", tab: "Pièces" },
+    { path: "/faconnage", tab: "Façonnage" },
+    { path: "/bars", tab: "Barres" },
+    { path: "/bar-assignments", tab: "Affectations" },
+    { path: "/production", tab: "Production" },
+    { path: "/quality", tab: "Qualité" },
+    { path: "/history", tab: "Historique" },
+  ];
+  for (const width of [375, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const route of routes) {
+      await page.goto(`/offers/${offerId}${route.path}`, { waitUntil: "domcontentloaded" });
+      const offerNav = page.getByRole("navigation", { name: "Navigation de l’affaire" });
+      await expect(offerNav.getByRole("link", { name: route.tab, exact: true })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      const documentWidth = await page.evaluate(() =>
+        Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+      );
+      expect(
+        documentWidth,
+        `${route.path || "/"} must not overflow at ${width}px`,
+      ).toBeLessThanOrEqual(width);
+      if (width === 375) {
+        const screenshotName = route.path.replaceAll("/", "-").replace(/^-/, "") || "overview";
+        await page.screenshot({
+          path: join(screenshotDirectory, `offer-${screenshotName}-375.png`),
+        });
+      }
+    }
   }
 });
 

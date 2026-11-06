@@ -79,7 +79,10 @@ test.describe("admin authenticated workflows", () => {
       await expect(page.getByRole("heading", { name: target.heading })).toBeVisible();
       await page.waitForTimeout(250);
       await page.screenshot({
-        path: join(screenshotDirectory, `primary-${target.path.slice(1)}-1440.png`.replaceAll("/", "-")),
+        path: join(
+          screenshotDirectory,
+          `primary-${target.path.slice(1)}-1440.png`.replaceAll("/", "-"),
+        ),
       });
     }
     expect(apiFailures, "API requests from the primary pages must not return 5xx").toEqual([]);
@@ -92,6 +95,7 @@ test.describe("admin authenticated workflows", () => {
     const paths = [
       "/dashboard",
       "/offers",
+      "/clients",
       "/machines",
       "/assignments",
       "/quality",
@@ -99,9 +103,15 @@ test.describe("admin authenticated workflows", () => {
       "/planning",
       "/users",
       "/settings",
+      "/settings/profiles",
       "/notifications",
       "/profile",
+      "/search?q=IPE",
     ];
+    const machinesResponse = await page.request.get("http://localhost:4000/machines");
+    expect(machinesResponse.status()).toBe(200);
+    const machines = (await machinesResponse.json()) as { machines: Array<{ id: string }> };
+    if (machines.machines[0]) paths.push(`/machines/${machines.machines[0].id}`);
     for (const width of [375, 768]) {
       await page.setViewportSize({ width, height: 900 });
       for (const path of paths) {
