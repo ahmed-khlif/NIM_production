@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException } from "@nestjs/common";
+import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../src/infrastructure/prisma/prisma.service";
 import { PiecesService } from "../src/pieces/pieces.service";
@@ -11,10 +11,17 @@ const actor = {
 const dates = { createdAt: new Date("2026-01-01"), updatedAt: new Date("2026-01-01") };
 
 function createService(prisma: Partial<PrismaService>): PiecesService {
-  const candidate = prisma as PrismaService & { offer?: { findUnique: ReturnType<typeof vi.fn> } };
+  const candidate = prisma as PrismaService & {
+    offer?: { findUnique: ReturnType<typeof vi.fn> };
+    materialProfile?: { findUnique: ReturnType<typeof vi.fn> };
+  };
   if (!candidate.offer) {
     candidate.offer = { findUnique: vi.fn().mockResolvedValue({ status: "DRAFT" }) } as never;
   }
+  if (!candidate.materialProfile) {
+    candidate.materialProfile = { findUnique: vi.fn().mockResolvedValue(null), findFirst: vi.fn().mockResolvedValue(null), findMany: vi.fn().mockResolvedValue([]) } as never;
+  }
+  candidate.$queryRaw ??= vi.fn().mockResolvedValue([]) as never;
   return new PiecesService(candidate as PrismaService);
 }
 
@@ -34,23 +41,63 @@ describe("PiecesService", () => {
     expect(piece.findFirst).not.toHaveBeenCalled();
   });
 
-  it("keeps piece listing scoped to the selected offer", async () => {
+  it("keeps piece listing scoped and does not calculate global facets on every page", async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const count = vi.fn().mockResolvedValue(0);
-    const service = createService({ piece: { findMany, count } } as never);
+    const queryRaw = vi.fn();
+    const service = createService({ piece: { findMany, count }, $queryRaw: queryRaw } as never);
 
     await expect(service.listPieces("offer-a")).resolves.toMatchObject({
       pieces: [],
-      profiles: [],
       page: 1,
       pageSize: 20,
       total: 0,
       totalPages: 1,
     });
     expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { offerId: "offer-a" } }),
+      expect.objectContaining({
+        where: { offerId: "offer-a" },
+        orderBy: expect.arrayContaining([{ profile: "asc" }]),
+      }),
     );
     expect(count).toHaveBeenCalledWith({ where: { offerId: "offer-a" } });
+    expect(queryRaw).not.toHaveBeenCalled();
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads sorted facets only when the client requests them and scopes them to an existing offer", async () => {
+    const queryRaw = vi.fn().mockResolvedValue([
+      { kind: "profile", value: "IPE200" },
+      { kind: "quality", value: "S275JR" },
+      { kind: "designation", value: "POUTRE" },
+      { kind: "profile", value: null },
+    ]);
+    const offerFindUnique = vi.fn().mockResolvedValue({ id: "offer-a" });
+    const service = createService({
+      offer: { findUnique: offerFindUnique },
+      $queryRaw: queryRaw as never,
+    } as never);
+
+    await expect(service.listPieceFacets("offer-a")).resolves.toEqual({
+      profiles: ["IPE200"],
+      qualities: ["S275JR"],
+      designations: ["POUTRE"],
+    });
+    expect(offerFindUnique).toHaveBeenCalledWith({ where: { id: "offer-a" }, select: { id: true } });
+    expect(queryRaw).toHaveBeenCalledOnce();
+  });
+
+  it("rejects missing or malformed scoped facet requests before querying Piece", async () => {
+    const queryRaw = vi.fn();
+    const offerFindUnique = vi.fn().mockResolvedValue(null);
+    const service = createService({
+      offer: { findUnique: offerFindUnique },
+      $queryRaw: queryRaw as never,
+    } as never);
+
+    await expect(service.listPieceFacets("unknown-offer")).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.listPieceFacets(" offer-with-padding ")).rejects.toBeInstanceOf(BadRequestException);
+    expect(queryRaw).not.toHaveBeenCalled();
   });
 
   it("validates and applies server-side piece list filters and pagination", async () => {
@@ -217,7 +264,7 @@ describe("PiecesService", () => {
       units: [{ status: "PENDING" }, { status: "PENDING" }, { status: "PENDING" }],
     };
     const transaction = {
-      piece: { create: vi.fn().mockResolvedValue(created) },
+      piece: { findMany: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue(created) },
       historyEvent: { create: vi.fn() },
       offer: { update: vi.fn() },
       cuttingPlan: { updateMany: vi.fn() },
@@ -238,10 +285,9 @@ describe("PiecesService", () => {
         lengthMm: 6000,
       }),
     ).resolves.toMatchObject({ reference: "CMD-001", quantity: 3, completedUnits: 0 });
-    expect(prisma.piece.findFirst).toHaveBeenCalledWith({
-      where: { offerId: "offer-1", reference: "CMD-001" },
-      select: { id: true },
-    });
+    expect(transaction.piece.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { offerId: "offer-1" }, select: { reference: true },
+    }));
     expect(transaction.piece.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -269,6 +315,138 @@ describe("PiecesService", () => {
     });
   });
 
+  it("creates several same-profile lengths atomically with distinct references, units, and history", async () => {
+    const transaction = {
+      offer: { update: vi.fn() },
+      piece: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => {
+          const units = data.units as { createMany: { data: Array<{ sequenceNumber: number }> } };
+          return {
+            id: `piece-${String(data.reference)}`,
+            ...data,
+            status: "PLANNED",
+            createdById: actor.user.id,
+            version: 1,
+            ...dates,
+            units: units.createMany.data.map((unit) => ({ ...unit, status: "PENDING", productionStatus: "PENDING" })),
+          };
+        }),
+      },
+      historyEvent: { create: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+      materialProfile: { findUnique: vi.fn().mockResolvedValue({ kgPerMeter: 16.7, isActive: true }) },
+    } as never);
+
+    const result = await service.createPiecesBatch(actor, "offer-1", {
+      pieces: [
+        { profile: "HEA100", lengthMm: 3200, quantity: 2 },
+        { profile: "HEA100", lengthMm: 5000, quantity: 1 },
+      ],
+    });
+
+    expect(result.pieces.map((piece) => piece.reference)).toEqual(["P-001", "P-002"]);
+    expect(transaction.piece.create).toHaveBeenCalledTimes(2);
+    expect(transaction.piece.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ data: expect.objectContaining({
+      profile: "HEA100", lengthMm: 3200, quantity: 2, unitWeightKg: 53.44, totalWeightKg: 106.88,
+    }) }));
+    expect(transaction.piece.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ data: expect.objectContaining({
+      profile: "HEA100", lengthMm: 5000, quantity: 1, unitWeightKg: 83.5, totalWeightKg: 83.5,
+    }) }));
+    expect(transaction.historyEvent.create).toHaveBeenCalledTimes(2);
+    expect(transaction.offer.update).toHaveBeenCalledOnce();
+  });
+
+  it("rejects duplicate references inside a length batch before committing the remaining rows", async () => {
+    const transaction = {
+      offer: { update: vi.fn() },
+      piece: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => ({
+          id: "piece-first",
+          ...data,
+          status: "PLANNED",
+          createdById: actor.user.id,
+          version: 1,
+          ...dates,
+          units: [{ status: "PENDING", productionStatus: "PENDING" }],
+        })),
+      },
+      historyEvent: { create: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+
+    await expect(service.createPiecesBatch(actor, "offer-1", {
+      pieces: [
+        { reference: "CUT-A", profile: "IPE200", lengthMm: 3200, quantity: 1 },
+        { reference: "cut-a", profile: "IPE200", lengthMm: 5000, quantity: 1 },
+      ],
+    })).rejects.toBeInstanceOf(ConflictException);
+    expect(transaction.piece.create).toHaveBeenCalledOnce();
+  });
+
+  it("allows adding a manually entered piece to a READY offer", async () => {
+    const transaction = {
+      piece: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockResolvedValue({
+          id: "piece-ready-new", reference: "P-001", quantity: 1, profile: "IPE200",
+          quality: "UNKNOWN", lengthMm: 3200, unitWeightKg: null, totalWeightKg: null,
+          designation: "À compléter", priority: "NORMAL", dueDate: null, status: "PLANNED",
+          createdById: "admin-1", version: 1, ...dates,
+          units: [{ status: "PENDING", productionStatus: "PENDING" }],
+        }),
+      },
+      historyEvent: { create: vi.fn() },
+      offer: { update: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      offer: { findUnique: vi.fn().mockResolvedValue({ status: "READY" }) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+
+    await expect(service.createPiece(actor, "offer-ready", {
+      quantity: 1, profile: "IPE200", lengthMm: 3200,
+    })).resolves.toMatchObject({ reference: "P-001" });
+    expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ eventType: "PIECE_CREATED", metadata: expect.objectContaining({ offerId: "offer-ready" }) }),
+    }));
+  });
+
+  it("allows editing a READY offer piece while all of its units remain pending", async () => {
+    const target = {
+      id: "piece-ready", offerId: "offer-ready", reference: "P-001", quantity: 1,
+      profile: "IPE200", quality: "UNKNOWN", lengthMm: 3200, unitWeightKg: null,
+      totalWeightKg: null, designation: "À compléter", priority: "NORMAL", dueDate: null,
+      status: "PLANNED", createdById: "admin-1", version: 1, ...dates,
+      units: [{ status: "PENDING", productionStatus: "PENDING" }],
+    };
+    const transaction = {
+      offer: { findUnique: vi.fn().mockResolvedValue({ status: "READY" }), update: vi.fn() },
+      piece: { findFirst: vi.fn().mockResolvedValue(target), update: vi.fn().mockResolvedValue({ ...target, lengthMm: 3500, version: 2 }) },
+      historyEvent: { create: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+
+    await expect(service.updatePiece(actor, "offer-ready", "piece-ready", {
+      profile: "IPE200", quality: "UNKNOWN", lengthMm: 3500, designation: "À compléter",
+    })).resolves.toMatchObject({ lengthMm: 3500 });
+    expect(transaction.piece.update).toHaveBeenCalledOnce();
+    expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ eventType: "PIECE_UPDATED" }),
+    }));
+  });
+
   it("stores the Tekla business fields and calculates total weight for manual creation", async () => {
     const created = {
       id: "piece-tekla-1",
@@ -289,7 +467,7 @@ describe("PiecesService", () => {
       units: [{ status: "PENDING" }, { status: "PENDING" }],
     };
     const transaction = {
-      piece: { create: vi.fn().mockResolvedValue(created) },
+      piece: { findMany: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue(created) },
       historyEvent: { create: vi.fn() },
       offer: { update: vi.fn() },
       cuttingPlan: { updateMany: vi.fn() },
@@ -325,6 +503,65 @@ describe("PiecesService", () => {
         }),
       }),
     );
+  });
+
+  it("generates a serialized Offer-local reference and defaults optional quality/designation", async () => {
+    const transaction = {
+      piece: {
+        findMany: vi.fn().mockResolvedValue([{ reference: "P-009" }, { reference: "P-002" }]),
+        create: vi.fn().mockResolvedValue({
+          id: "piece-auto", reference: "P-010", quantity: 1, profile: "IPE200", quality: "UNKNOWN",
+          lengthMm: 3200, unitWeightKg: null, totalWeightKg: null, designation: "À compléter",
+          priority: "NORMAL", dueDate: null, status: "PLANNED", createdById: "admin-1", version: 1,
+          ...dates, units: [{ status: "PENDING", productionStatus: "PENDING" }],
+        }),
+      },
+      historyEvent: { create: vi.fn() },
+      offer: { update: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+
+    await expect(service.createPiece(actor, "offer-1", {
+      quantity: 1, profile: "IPE200", lengthMm: 3200, quality: "", designation: "",
+    })).resolves.toMatchObject({ reference: "P-010", quality: "UNKNOWN", designation: "À compléter" });
+    expect(transaction.offer.update.mock.invocationCallOrder[0]).toBeLessThan(transaction.piece.findMany.mock.invocationCallOrder[0]);
+    expect(transaction.piece.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ reference: "P-010", quality: "UNKNOWN", designation: "À compléter" }),
+    }));
+  });
+
+  it("calculates unit and total piece weight from the active profile catalogue when not overridden", async () => {
+    const transaction = {
+      piece: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => ({
+          id: "piece-calculated", ...data, status: "PLANNED", createdById: actor.user.id, version: 1,
+          ...dates, units: [{ status: "PENDING", productionStatus: "PENDING" }],
+        })),
+      },
+      historyEvent: { create: vi.fn() },
+      offer: { update: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      materialProfile: { findUnique: vi.fn().mockResolvedValue({ kgPerMeter: 22.4, isActive: true }) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+    await service.createPiece(actor, "offer-1", { quantity: 2, profile: "IPE200", lengthMm: 3200 });
+    expect(transaction.piece.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ unitWeightKg: 71.68, totalWeightKg: 143.36 }),
+    }));
+  });
+
+  it("suggests the next reference from this Offer’s existing sequence", async () => {
+    const service = createService({
+      offer: { findUnique: vi.fn().mockResolvedValue({ id: "offer-1" }) },
+      piece: { findMany: vi.fn().mockResolvedValue([{ reference: "R10" }, { reference: "R08" }]) },
+    } as never);
+    await expect(service.getNextPieceReference("offer-1")).resolves.toEqual({ reference: "R11" });
   });
 
   it("does not archive a piece that is already in production", async () => {
@@ -421,6 +658,52 @@ describe("PiecesService", () => {
     });
   });
 
+  it("maps imported profile aliases to the catalogue designation and shows the mapping in preview", async () => {
+    const service = createService({
+      materialProfile: {
+        findMany: vi.fn().mockResolvedValue([{ profile: "IPE200", profileKey: "IPE200", aliases: ["IPE-200"] }]),
+      },
+      piece: { findMany: vi.fn().mockResolvedValue([]) },
+    } as never);
+
+    await expect(service.previewImport("offer-1", {
+      filename: "pieces.csv",
+      content: "reference,quantity,profile,length_mm\nP-001,2,IPE-200,6000",
+    })).resolves.toMatchObject({
+      validRows: 1,
+      rows: [{
+        valid: true,
+        canonicalProfile: "IPE200",
+        values: { profile: "IPE-200" },
+      }],
+    });
+  });
+
+  it("persists the catalogue designation when an imported piece uses an alias", async () => {
+    const transaction = {
+      piece: { create: vi.fn().mockResolvedValue({ id: "piece-1", reference: "P-001", quantity: 1 }) },
+      historyEvent: { create: vi.fn() },
+      offer: { update: vi.fn() },
+      cuttingPlan: { updateMany: vi.fn() },
+    };
+    const service = createService({
+      materialProfile: {
+        findMany: vi.fn().mockResolvedValue([{ profile: "IPE200", profileKey: "IPE200", aliases: ["IPE-200"] }]),
+      },
+      piece: { findMany: vi.fn().mockResolvedValue([]) },
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    } as never);
+
+    await service.commitImport(actor, "offer-1", {
+      filename: "pieces.csv",
+      content: "reference,quantity,profile,length_mm\nP-001,1,IPE-200,6000",
+    });
+
+    expect(transaction.piece.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ reference: "P-001", profile: "IPE200" }),
+    }));
+  });
+
   it("previews a Windows-code-page Tekla HTML XLS export and preserves source weights", async () => {
     const prisma = { piece: { findMany: vi.fn().mockResolvedValue([]) } };
     const service = createService(prisma as never);
@@ -463,7 +746,6 @@ describe("PiecesService", () => {
   it("commits valid CSV rows transactionally and audits each imported piece", async () => {
     const createdPiece = { id: "piece-imported", reference: "CMD-001", quantity: 2 };
     const transaction = {
-      importBatch: { create: vi.fn().mockResolvedValue({ id: "batch-1" }) },
       piece: { create: vi.fn().mockResolvedValue(createdPiece) },
       historyEvent: { create: vi.fn() },
       offer: { update: vi.fn() },
@@ -482,17 +764,12 @@ describe("PiecesService", () => {
         filename: "pieces.csv",
         content: "reference,quantity,profile,lengthMm\nCMD-001,2,Profil 40,6000",
       }),
-    ).resolves.toMatchObject({ batchId: "batch-1", rowsCreated: 1, status: "COMMITTED" });
-    expect(transaction.importBatch.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: "COMMITTED", rowsCreated: 1 }),
-      }),
-    );
+    ).resolves.toMatchObject({ rowsCreated: 1, status: "COMMITTED" });
     expect(transaction.historyEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           eventType: "PIECE_IMPORTED",
-          metadata: expect.objectContaining({ batchId: "batch-1" }),
+          metadata: expect.not.objectContaining({ filename: expect.anything(), batchId: expect.anything() }),
         }),
       }),
     );

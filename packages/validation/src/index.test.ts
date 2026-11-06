@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateTotalWeightKg,
+  calculatePieceWeightKg,
   classifyProfile,
+  createPieceSchema,
+  createPieceBatchSchema,
   createManualPieceSchema,
+  createUserSchema,
   dashboardQuerySchema,
   faconnageOptimizationSchema,
   loginSchema,
+  materialProfileSchema,
+  operatorLoginSchema,
   parseEnvironment,
   pieceListQuerySchema,
   qualityDecisionSchema,
@@ -13,6 +19,11 @@ import {
 } from "./index";
 
 describe("foundation validation", () => {
+  it("uses the existing username/password account for operator tablet login", () => {
+    expect(operatorLoginSchema.parse({ username: " Operator_1 ", password: "secret" })).toEqual({ username: "Operator_1", password: "secret" });
+    expect(operatorLoginSchema.safeParse({ connectionKey: "NIM-old-key" }).success).toBe(false);
+    expect(createUserSchema.safeParse({ username: "operator", displayName: "Operator User", role: "OPERATOR", password: "SecurePass!2026" }).success).toBe(true);
+  });
   it("classifies detailed profiles strictly and preserves unknown families", () => {
     expect(classifyProfile("IPE200")).toBe("IPE");
     expect(classifyProfile("HEA300")).toBe("HEA");
@@ -38,11 +49,48 @@ describe("foundation validation", () => {
         profiles: [input.profiles[0], { ...input.profiles[0], profile: " ipe200 " }],
       }).success,
     ).toBe(false);
+    expect(faconnageOptimizationSchema.safeParse({
+      profiles: [{ profile: "IPE200", kerfMm: 3, rawLengths: [{ lengthMm: 12000, quantity: 0 }] }],
+    }).success).toBe(true);
+    expect(faconnageOptimizationSchema.safeParse({
+      profiles: [{ profile: "IPE200", kerfMm: 3, rawLengths: [{ lengthMm: 12000, quantity: -1 }] }],
+    }).success).toBe(false);
   });
 
   it("calculates manual total weight in kilograms without floating noise", () => {
     expect(calculateTotalWeightKg(2.45, 3)).toBe(7.35);
+    expect(calculatePieceWeightKg(22.4, 3200)).toBe(71.68);
     expect(calculateTotalWeightKg(undefined, 3)).toBeUndefined();
+  });
+
+  it("validates exact material profiles and their distinct positive raw lengths", () => {
+    expect(materialProfileSchema.parse({ profile: " IPE 200 ", kgPerMeter: 22.4, rawLengthsMm: [12100, 15100] }).profile).toBe("IPE 200");
+    expect(materialProfileSchema.parse({ reference: "legacy-ref", profile: "IPE200", kgPerMeter: 22.4, rawLengthsMm: [12100] })).not.toHaveProperty("reference");
+    expect(materialProfileSchema.parse({ profile: "IPE200", aliases: ["IPE-200", " IPE 200 ANCIEN "], kgPerMeter: 22.4, rawLengthsMm: [12100] }).aliases).toEqual(["IPE-200", "IPE 200 ANCIEN"]);
+    expect(materialProfileSchema.safeParse({ profile: "IPE200", aliases: ["IPE-200", " IPE - 200 "], kgPerMeter: 22.4, rawLengthsMm: [12100] }).success).toBe(false);
+    expect(materialProfileSchema.safeParse({ profile: "IPE200", aliases: ["IPE 200"], kgPerMeter: 22.4, rawLengthsMm: [12100] }).success).toBe(false);
+    expect(materialProfileSchema.safeParse({ profile: "IPE200", kgPerMeter: 22.4, rawLengthsMm: [] }).success).toBe(false);
+    expect(materialProfileSchema.safeParse({ profile: "IPE200", kgPerMeter: 22.4, rawLengthsMm: [12100, 12100] }).success).toBe(false);
+  });
+
+  it("allows an Offer to generate the piece reference and defaults optional quality and designation", () => {
+    const withoutOptionalFields = createPieceSchema.parse({ quantity: 1, profile: "IPE200", lengthMm: 3200 });
+    expect(withoutOptionalFields).not.toHaveProperty("reference");
+    expect(withoutOptionalFields).toMatchObject({
+      quality: "UNKNOWN",
+      designation: "À compléter",
+    });
+    expect(createPieceSchema.parse({ quantity: 1, profile: "IPE200", lengthMm: 3200, quality: "", designation: "" })).toMatchObject({
+      quality: "UNKNOWN",
+      designation: "À compléter",
+    });
+  });
+
+  it("validates a bounded batch of different cut lengths", () => {
+    const piece = { quantity: 1, profile: "HEA100", lengthMm: 3200 };
+    expect(createPieceBatchSchema.parse({ pieces: [piece, { ...piece, lengthMm: 5000 }] }).pieces).toHaveLength(2);
+    expect(createPieceBatchSchema.safeParse({ pieces: [piece] }).success).toBe(false);
+    expect(createPieceBatchSchema.safeParse({ pieces: Array.from({ length: 51 }, (_, index) => ({ ...piece, lengthMm: 1000 + index })) }).success).toBe(false);
   });
 
   it("normalizes detailed profiles and requires a positive manual unit weight", () => {
@@ -55,9 +103,7 @@ describe("foundation validation", () => {
     };
     expect(createManualPieceSchema.parse(input).profile).toBe("L80*80*8");
     expect(createManualPieceSchema.safeParse({ ...input, unitWeightKg: 0 }).success).toBe(false);
-    expect(createManualPieceSchema.safeParse({ ...input, unitWeightKg: undefined }).success).toBe(
-      false,
-    );
+    expect(createManualPieceSchema.safeParse({ ...input, unitWeightKg: undefined }).success).toBe(true);
   });
 
   it("requires both login fields", () => {

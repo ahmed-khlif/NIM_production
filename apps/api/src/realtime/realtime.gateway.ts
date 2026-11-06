@@ -9,8 +9,13 @@ import { RealtimeService } from "./realtime.service";
 
 type AuthenticatedSocket = Socket & { data: { auth?: AuthContext } };
 
+const realtimeOrigins = (process.env.CORS_ORIGINS ?? process.env.APP_URL ?? "http://localhost:3000")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 @Injectable()
-@WebSocketGateway({ namespace: "/realtime", cors: { origin: process.env.APP_URL ?? "http://localhost:3000", credentials: true } })
+@WebSocketGateway({ namespace: "/realtime", cors: { origin: realtimeOrigins, credentials: true } })
 export class RealtimeGateway implements OnModuleInit, OnModuleDestroy {
   @WebSocketServer()
   private server!: Server;

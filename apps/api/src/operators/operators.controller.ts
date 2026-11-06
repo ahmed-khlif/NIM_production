@@ -20,8 +20,4 @@ export class OperatorsController {
     return this.operators.setTabletAccess(actor, id, false);
   }
 
-  @Post(":id/reset-key")
-  async resetKey(@CurrentAuth() actor: AuthContext, @Param("id") id: string) {
-    return this.operators.resetConnectionKey(actor, id);
-  }
 }

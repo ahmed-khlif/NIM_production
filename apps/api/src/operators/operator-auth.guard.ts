@@ -14,7 +14,7 @@ export class OperatorAuthGuard implements CanActivate {
     if (!session) {
       throw new UnauthorizedException({
         code: "OPERATOR_SESSION_REQUIRED",
-        message: "Connectez-vous avec votre clé opérateur.",
+        message: "Connectez-vous avec votre identifiant et votre mot de passe opérateur.",
       });
     }
     request.operatorAuth = session;

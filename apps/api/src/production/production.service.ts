@@ -12,6 +12,7 @@ import { productionCurrentQuerySchema, startProductionSchema } from "@nim/valida
 import type { ManagedProductionOperation, ProductionQueueItem } from "@nim/types";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { RealtimeService } from "../realtime/realtime.service";
 
 const operationInclude = {
@@ -256,7 +257,7 @@ export class ProductionService {
             data: { status: "LANCEE" },
           });
           if (barTransition.count === 1) {
-            await transaction.historyEvent.create({
+            const barStartedEvent = await transaction.historyEvent.create({
               data: {
                 eventType: "BAR_PRODUCTION_STARTED",
                 entityType: "CUTTING_BAR",
@@ -272,6 +273,7 @@ export class ProductionService {
                 },
               },
             });
+            await deliverBusinessNotification(transaction, barStartedEvent, { offerId: unit.piece.offerId, machineId: machine.id });
           }
         }
         const nextPieceStatus =
@@ -287,7 +289,7 @@ export class ProductionService {
             where: { id: offer.id },
             data: { status: "IN_PRODUCTION", version: { increment: 1 } },
           });
-          await transaction.historyEvent.create({
+          const offerStartedEvent = await transaction.historyEvent.create({
             data: {
               eventType: "OFFER_PRODUCTION_STARTED",
               entityType: "OFFER",
@@ -301,8 +303,9 @@ export class ProductionService {
               },
             },
           });
+          await deliverBusinessNotification(transaction, offerStartedEvent, { offerId: offer.id });
         }
-        await transaction.historyEvent.create({
+        const productionStartedEvent = await transaction.historyEvent.create({
           data: {
             eventType: "PRODUCTION_STARTED",
             entityType: "PRODUCTION_OPERATION",
@@ -321,6 +324,7 @@ export class ProductionService {
             },
           },
         });
+        await deliverBusinessNotification(transaction, productionStartedEvent, { offerId: unit.piece.offerId, machineId: machine.id });
 
         return this.toManagedOperation({
           ...operation,
@@ -434,7 +438,7 @@ export class ProductionService {
             data: { status: "FABRIQUEE", fabricatedAt: completedAt },
           });
           if (barTransition.count === 1) {
-            await transaction.historyEvent.create({
+            const barCompletedEvent = await transaction.historyEvent.create({
               data: {
                 eventType: "BAR_PRODUCTION_COMPLETED",
                 entityType: "CUTTING_BAR",
@@ -449,6 +453,7 @@ export class ProductionService {
                 },
               },
             });
+            await deliverBusinessNotification(transaction, barCompletedEvent, { offerId: operation.piece.offerId, machineId: operation.machineId });
           }
         }
       }
@@ -458,7 +463,7 @@ export class ProductionService {
           data: { status: nextPieceStatus, version: { increment: 1 } },
         });
       }
-      await transaction.historyEvent.create({
+      const productionCompletedEvent = await transaction.historyEvent.create({
         data: {
           eventType: "PRODUCTION_COMPLETED",
           entityType: "PRODUCTION_OPERATION",
@@ -478,6 +483,7 @@ export class ProductionService {
           },
         },
       });
+      await deliverBusinessNotification(transaction, productionCompletedEvent, { offerId: operation.piece.offerId, machineId: operation.machineId });
 
       const completed = await transaction.productionOperation.findUnique({
         where: { id: operation.id },
@@ -503,6 +509,115 @@ export class ProductionService {
       actorUserId: actor.user.id,
     });
     return result;
+  }
+
+  async endMachineSessionByAdmin(actor: AuthContext, operatorId: string) {
+    if (actor.user.role !== "ADMIN") {
+      throw new ForbiddenException({
+        code: "ADMIN_REQUIRED",
+        message: "Seul un administrateur peut terminer une session depuis la gestion des utilisateurs.",
+      });
+    }
+
+    let endedSession: { id: string; machineId: string };
+    try {
+      endedSession = await this.prisma.$transaction(
+        async (transaction) => {
+          const membership = await transaction.machineSessionOperator.findFirst({
+            where: {
+              operatorId,
+              active: true,
+              machineSession: { status: "ACTIVE" },
+            },
+            include: {
+              machineSession: {
+                include: {
+                  machine: { select: { id: true, name: true } },
+                  members: { where: { active: true }, select: { operatorId: true } },
+                },
+              },
+            },
+          });
+          if (!membership) {
+            throw new NotFoundException({
+              code: "MACHINE_SESSION_NOT_FOUND",
+              message: "Aucune session machine active n’est associée à cet opérateur.",
+            });
+          }
+
+          const session = membership.machineSession;
+          const runningRun = await transaction.productionRun.findFirst({
+            where: { machineSessionId: session.id, status: "RUNNING" },
+            select: { cuttingBar: { select: { reference: true } } },
+          });
+          if (runningRun) {
+            throw new ConflictException({
+              code: "SESSION_HAS_RUNNING_PRODUCTION",
+              message: `Terminez d’abord la fabrication de la barre ${runningRun.cuttingBar.reference} avant de fermer cette session.`,
+            });
+          }
+
+          const endedAt = new Date();
+          const changed = await transaction.machineSession.updateMany({
+            where: { id: session.id, status: "ACTIVE" },
+            data: { status: "ENDED", endedAt },
+          });
+          if (changed.count !== 1) {
+            throw new ConflictException({
+              code: "MACHINE_SESSION_ALREADY_ENDED",
+              message: "Cette session machine vient déjà d’être terminée.",
+            });
+          }
+          await transaction.machineSessionOperator.updateMany({
+            where: { machineSessionId: session.id, active: true },
+            data: { active: false, leftAt: endedAt },
+          });
+          const event = await transaction.historyEvent.create({
+            data: {
+              eventType: "MACHINE_SESSION_ENDED",
+              entityType: "MACHINE_SESSION",
+              entityId: session.id,
+              actorUserId: actor.user.id,
+              actorRole: actor.user.role,
+              metadata: {
+                machineId: session.machineId,
+                machineName: session.machine.name,
+                endedAt: endedAt.toISOString(),
+                endedByAdmin: true,
+                operatorIds: session.members.map((member) => member.operatorId),
+              },
+            },
+          });
+          await deliverBusinessNotification(transaction, event, {
+            machineId: session.machineId,
+            targetUserIds: session.members.map((member) => member.operatorId),
+            href: "/production/tablet",
+            skipRoleRecipients: true,
+          });
+          return { id: session.id, machineId: session.machineId };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === "P2034" || error.code === "P2002")
+      ) {
+        throw new ConflictException({
+          code: "MACHINE_SESSION_CONFLICT",
+          message: "L’état de la session a changé. Actualisez la page puis réessayez.",
+        });
+      }
+      throw error;
+    }
+
+    this.realtime?.publish({
+      type: "machine-session.ended",
+      entityType: "MACHINE_SESSION",
+      entityId: endedSession.id,
+      actorUserId: actor.user.id,
+    });
+    return { success: true as const };
   }
 
   async finish(actor: AuthContext, operationId: string): Promise<ManagedProductionOperation> {

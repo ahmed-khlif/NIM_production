@@ -70,6 +70,69 @@ describe("CuttingBarsService", () => {
     expect(findMany).not.toHaveBeenCalled();
   });
 
+  it("builds a material report from active validated bars and excludes cancelled bars", async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: "bar-1", reference: "OFF-001-B001", profile: "IPE200", rawLengthMm: 6000,
+        usedLengthMm: 3200, wasteMm: 2800, status: "FACONNEE", createdAt: new Date(),
+        cuttingPlan: { reference: "OFF-001-CP-001", createdAt: new Date() },
+        items: [{ pieceUnit: { sequenceNumber: 1, piece: { reference: "P-001", lengthMm: 3200, unitWeightKg: null } } }],
+      },
+      {
+        id: "bar-2", reference: "OFF-001-B002", profile: "IPE200", rawLengthMm: 6000,
+        usedLengthMm: 4200, wasteMm: 1800, status: "AFFECTEE", createdAt: new Date(),
+        cuttingPlan: { reference: "OFF-001-CP-001", createdAt: new Date() },
+        items: [{ pieceUnit: { sequenceNumber: 1, piece: { reference: "P-002", lengthMm: 4200, unitWeightKg: null } } }],
+      },
+    ]);
+    const service = createService({
+      offer: { findUnique: vi.fn().mockResolvedValue({ id: "offer-1", reference: "OFF-001", revision: "A", name: "Atelier", clientName: null, site: "Sfax", status: "READY" }) },
+      cuttingBar: { findMany },
+      materialProfile: {
+        findMany: vi.fn().mockResolvedValue([{ profileKey: "IPE200", kgPerMeter: 22.4 }]),
+      },
+    } as never);
+
+    const report = await service.getMaterialReport("offer-1");
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { offerId: "offer-1", status: { not: "CANCELLED" } },
+      orderBy: [{ profile: "asc" }, { rawLengthMm: "asc" }],
+    }));
+    expect(report.materials).toEqual([{
+      profile: "IPE200", rawLengthMm: 6000, quantity: 2,
+      totalWasteMm: 4600,
+      netWeightKg: 165.76,
+      kgPerMeter: 22.4, grossWeightKg: 268.8, wasteRate: (4600 / 12000) * 100,
+    }]);
+    expect(report.bars).toEqual([
+      {
+        reference: "OFF-001-B001", profile: "IPE200", rawLengthMm: 6000,
+        usedLengthMm: 3200, wasteMm: 2800, status: "FACONNEE",
+        cuttingPlanReference: "OFF-001-CP-001", machine: null,
+        netWeightKg: 71.68, grossWeightKg: 134.4,
+        items: [{ reference: "P-001", sequenceNumber: 1, lengthMm: 3200 }],
+      },
+      {
+        reference: "OFF-001-B002", profile: "IPE200", rawLengthMm: 6000,
+        usedLengthMm: 4200, wasteMm: 1800, status: "AFFECTEE",
+        cuttingPlanReference: "OFF-001-CP-001", machine: null,
+        netWeightKg: 94.08, grossWeightKg: 134.4,
+        items: [{ reference: "P-002", sequenceNumber: 1, lengthMm: 4200 }],
+      },
+    ]);
+    expect(report.totals).toMatchObject({
+      barCount: 2,
+      totalRawLengthMm: 12000,
+      totalWasteMm: 4600,
+      profileCount: 1,
+      netWeightKg: 165.76,
+      grossWeightKg: 268.8,
+      profilesWithoutWeight: [],
+      profilesWithoutNetWeight: [],
+      wasteRate: (4600 / 12000) * 100,
+    });
+  });
+
   it("rejects duplicate bar ids before opening a transaction", async () => {
     const transaction = vi.fn();
     const service = createService({ $transaction: transaction } as never);
@@ -96,7 +159,7 @@ describe("CuttingBarsService", () => {
     const result = await service.createFromPlanProposals(
       transaction as never,
       actor,
-      { id: "offer-1", reference: "OFF-001" },
+      { id: "offer-1", reference: "OFF-001", revision: "A" },
       { id: "plan-1", reference: "OFF-001-CP-001" },
       [{
         id: "proposal-1",
@@ -120,7 +183,7 @@ describe("CuttingBarsService", () => {
     expect(transaction.cuttingBar.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          reference: "OFF-001-B001",
+          reference: "A-OFF-001-B001",
           profile: "IPE200",
           rawLengthMm: 6000,
         }),

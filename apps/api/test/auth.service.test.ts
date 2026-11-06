@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException } from "@nestjs/common";
 import argon2 from "argon2";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../src/infrastructure/prisma/prisma.service";
@@ -143,7 +143,7 @@ describe("AuthService", () => {
     );
   });
 
-  it("lists existing OPERATOR users for the shared operator directory without exposing key hashes", async () => {
+  it("lists existing OPERATOR users without exposing credential material", async () => {
     const prisma = {
       user: {
         findMany: vi.fn().mockResolvedValue([
@@ -154,7 +154,6 @@ describe("AuthService", () => {
             role: "OPERATOR",
             isActive: true,
             tabletAccessEnabled: true,
-            connectionKeyHash: "private-hash",
             createdAt: new Date("2026-01-01T00:00:00.000Z"),
             lastLoginAt: null,
           },
@@ -173,10 +172,14 @@ describe("AuthService", () => {
         id: "user-operator-1",
         role: "OPERATOR",
         tabletAccessEnabled: true,
-        hasConnectionKey: true,
       }),
     ]);
-    expect(users[0]).not.toHaveProperty("connectionKeyHash");
+  });
+
+  it("prevents operators from changing their own password", async () => {
+    const service = createService();
+    const auth = { user: { id: "operator-1", username: "operator", displayName: "Op", role: "OPERATOR" as const }, sessionId: "s", tokenHash: "h" };
+    await expect(service.changePassword(auth, { currentPassword: "old-password", newPassword: "new-password-123" })).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it("prevents an administrator from disabling their own account", async () => {

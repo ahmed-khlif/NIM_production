@@ -28,15 +28,24 @@ export class QualityController {
   @Get("pending")
   async pending(
     @Query("offerId") offerId?: string,
-  ): Promise<{ units: Awaited<ReturnType<QualityService["listPending"]>> }> {
-    return { units: await this.qualityService.listPending(offerId) };
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+    @Query("search") search?: string,
+    @Query("sortBy") sortBy?: string,
+    @Query("sortDirection") sortDirection?: string,
+  ) {
+    return this.qualityService.listPending(offerId, { page: page === undefined ? 1 : Number(page), pageSize: pageSize === undefined ? 20 : Number(pageSize), search, sortBy, sortDirection });
   }
 
   @Get("history")
   async history(
     @Query("offerId") offerId?: string,
-  ): Promise<{ controls: Awaited<ReturnType<QualityService["listHistory"]>> }> {
-    return { controls: await this.qualityService.listHistory(offerId) };
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+    @Query("search") search?: string,
+    @Query("result") result?: string,
+  ) {
+    return this.qualityService.listHistory(offerId, { page: page === undefined ? 1 : Number(page), pageSize: pageSize === undefined ? 20 : Number(pageSize), search, result });
   }
 
   @Get("controls/:qualityControlId/images/:imageId")

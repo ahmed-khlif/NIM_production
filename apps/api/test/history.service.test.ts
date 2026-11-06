@@ -60,7 +60,7 @@ describe("HistoryService", () => {
       totalPages: 2,
     });
     expect(prisma.historyEvent.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ skip: 25, take: 25, orderBy: { createdAt: "desc" } }),
+      expect.objectContaining({ skip: 25, take: 25, orderBy: [{ createdAt: "desc" }, { id: "desc" }] }),
     );
   });
 

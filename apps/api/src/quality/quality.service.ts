@@ -25,6 +25,8 @@ import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { PieceImageStorage } from "../pieces/piece-image.storage";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
+import { parseListSort } from "../list-sorting";
 
 const pendingInclude = {
   piece: true,
@@ -184,28 +186,75 @@ export class QualityService {
     return normalized;
   }
 
-  async listPending(offerId?: string): Promise<ManagedQualityPendingUnit[]> {
+  async listPending(offerId?: string, options: { page?: number; pageSize?: number; search?: string; sortBy?: string; sortDirection?: string } = {}) {
     const normalizedOfferId = await this.assertOfferExists(offerId);
-    const units = await this.prisma.pieceUnit.findMany({
-      where: {
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    if (!Number.isInteger(page) || page < 1 || page > 1_000_000 || !Number.isInteger(pageSize) || ![10, 20, 50].includes(pageSize)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination de la file qualité est invalide." });
+    }
+    const search = options.search?.trim();
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "priority", "machine", "manufacturedAt"] as const, { sortBy: "manufacturedAt", sortDirection: "asc" });
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
+    const where: Prisma.PieceUnitWhereInput = {
         status: "QUALITY_PENDING",
-        ...(normalizedOfferId ? { piece: { offerId: normalizedOfferId } } : {}),
-      },
+        piece: {
+          ...(normalizedOfferId ? { offerId: normalizedOfferId } : {}),
+          ...(search ? { OR: [
+            { reference: { contains: search, mode: "insensitive" } },
+            { profile: { contains: search, mode: "insensitive" } },
+          ] } : {}),
+        },
+        ...(search ? { OR: [
+          { currentMachine: { name: { contains: search, mode: "insensitive" } } },
+          { currentOperator: { displayName: { contains: search, mode: "insensitive" } } },
+        ] } : {}),
+    };
+    const [units, total] = await Promise.all([
+      this.prisma.pieceUnit.findMany({
+      where,
       include: pendingInclude,
-      orderBy: [{ manufacturedAt: "asc" }, { id: "asc" }],
-    });
-    return units.map((unit) => this.toPendingUnit(unit));
+      orderBy: sort.sortBy === "reference"
+        ? [{ piece: { reference: sort.sortDirection } }, { id: "asc" }]
+        : sort.sortBy === "priority"
+          ? [{ piece: { priority: sort.sortDirection } }, { id: "asc" }]
+          : sort.sortBy === "machine"
+            ? [{ currentMachine: { name: sort.sortDirection } }, { id: "asc" }]
+            : [{ manufacturedAt: sort.sortDirection }, { id: "asc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      }),
+      this.prisma.pieceUnit.count({ where }),
+    ]);
+    return { units: units.map((unit) => this.toPendingUnit(unit)), pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } };
   }
 
-  async listHistory(offerId?: string): Promise<ManagedQualityControl[]> {
+  async listHistory(offerId?: string, options: { page?: number; pageSize?: number; search?: string; result?: string } = {}) {
     const normalizedOfferId = await this.assertOfferExists(offerId);
-    const controls = await this.prisma.qualityControl.findMany({
-      where: normalizedOfferId ? { piece: { offerId: normalizedOfferId } } : undefined,
-      include: controlInclude,
-      orderBy: { controlledAt: "desc" },
-      take: 100,
-    });
-    return controls.map((control) => this.toManagedControl(control));
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    if (!Number.isInteger(page) || page < 1 || page > 1_000_000 || !Number.isInteger(pageSize) || ![10, 20, 50].includes(pageSize)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination de l’historique qualité est invalide." });
+    }
+    const search = options.search?.trim();
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
+    if (options.result && !["CONFORM", "NON_CONFORM"].includes(options.result)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Le filtre de résultat qualité est invalide." });
+    }
+    const where: Prisma.QualityControlWhereInput = {
+      ...(normalizedOfferId ? { piece: { offerId: normalizedOfferId } } : {}),
+      ...(options.result ? { result: options.result as Prisma.EnumQualityControlResultFilter["equals"] } : {}),
+      ...(search ? { OR: [
+        { piece: { reference: { contains: search, mode: "insensitive" } } },
+        { controller: { displayName: { contains: search, mode: "insensitive" } } },
+        { comment: { contains: search, mode: "insensitive" } },
+      ] } : {}),
+    };
+    const [controls, total] = await Promise.all([
+      this.prisma.qualityControl.findMany({ where, include: controlInclude, orderBy: [{ controlledAt: "desc" }, { id: "desc" }], skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.qualityControl.count({ where }),
+    ]);
+    return { controls: controls.map((control) => this.toManagedControl(control)), pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } };
   }
 
   async validate(
@@ -293,7 +342,7 @@ export class QualityService {
             version: { increment: 1 },
           },
         });
-        await transaction.historyEvent.create({
+        const event = await transaction.historyEvent.create({
           data: {
             eventType: parsed.data.result === "CONFORM" ? "QUALITY_VALIDATED" : "QUALITY_REJECTED",
             entityType: "QUALITY_CONTROL",
@@ -312,6 +361,11 @@ export class QualityService {
               newUnitStatus: nextUnitStatus,
             },
           },
+        });
+        await deliverBusinessNotification(transaction, event, {
+          offerId: unit.piece.offerId,
+          machineId: unit.currentMachineId,
+          targetUserIds: unit.currentProductionOperatorId ? [unit.currentProductionOperatorId] : [],
         });
 
         return this.toManagedControl(control);
@@ -446,7 +500,7 @@ export class QualityService {
         }
       }
 
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: requiresApproval
             ? "QUALITY_DEVIATION_REQUESTED"
@@ -471,6 +525,11 @@ export class QualityService {
                 : "PENDING",
           },
         },
+      });
+      await deliverBusinessNotification(transaction, event, {
+        offerId: unit.piece.offerId,
+        machineId: unit.currentMachineId,
+        targetUserIds: unit.currentProductionOperatorId ? [unit.currentProductionOperatorId] : [],
       });
       return this.toDisposition(disposition);
     });
@@ -540,7 +599,7 @@ export class QualityService {
           data: { status: "ACCEPTED", version: { increment: 1 } },
         });
       }
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: approved ? "QUALITY_DEVIATION_APPROVED" : "QUALITY_DEVIATION_REJECTED",
           entityType: "QUALITY_DISPOSITION",
@@ -556,6 +615,11 @@ export class QualityService {
             newUnitStatus: approved ? "ACCEPTED" : existing.pieceUnit.status,
           },
         },
+      });
+      await deliverBusinessNotification(transaction, event, {
+        offerId: existing.pieceUnit.piece.offerId,
+        machineId: existing.pieceUnit.currentMachineId,
+        targetUserIds: existing.pieceUnit.currentProductionOperatorId ? [existing.pieceUnit.currentProductionOperatorId] : [],
       });
       return this.toDisposition(disposition);
     });

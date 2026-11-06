@@ -33,6 +33,13 @@ export class OfferPiecesController {
     return this.piecesService.listPieces(offerId, query);
   }
 
+  @Get("facets")
+  async facets(
+    @Param("offerId") offerId: string,
+  ): Promise<Awaited<ReturnType<PiecesService["listPieceFacets"]>>> {
+    return this.piecesService.listPieceFacets(offerId);
+  }
+
   @Get("profiles")
   @UseGuards(RolesGuard)
   @Roles("ADMIN", "PRODUCTION_MANAGER")
@@ -85,6 +92,17 @@ export class OfferPiecesController {
     return { piece: await this.piecesService.createPiece(actor, offerId, body) };
   }
 
+  @Post("batch")
+  @UseGuards(RolesGuard)
+  @Roles("ADMIN", "PRODUCTION_MANAGER")
+  async createBatch(
+    @CurrentAuth() actor: AuthContext,
+    @Param("offerId") offerId: string,
+    @Body() body: unknown,
+  ): Promise<{ pieces: Awaited<ReturnType<PiecesService["createPiecesBatch"]>>["pieces"] }> {
+    return this.piecesService.createPiecesBatch(actor, offerId, body);
+  }
+
   @Get(":id")
   async detail(
     @Param("offerId") offerId: string,
@@ -114,6 +132,17 @@ export class OfferPiecesController {
     @Param("id") id: string,
   ): Promise<{ piece: Awaited<ReturnType<PiecesService["archivePiece"]>> }> {
     return { piece: await this.piecesService.archivePiece(actor, offerId, id) };
+  }
+
+  @Delete("bulk")
+  @UseGuards(RolesGuard)
+  @Roles("ADMIN", "PRODUCTION_MANAGER")
+  async deleteUnused(
+    @CurrentAuth() actor: AuthContext,
+    @Param("offerId") offerId: string,
+    @Body() body: unknown,
+  ): Promise<{ deletedCount: number }> {
+    return this.piecesService.deleteUnusedPieces(actor, offerId, body);
   }
 
   @Post(":id/images")

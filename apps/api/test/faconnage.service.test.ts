@@ -91,6 +91,7 @@ describe("FaconnageService partial plan validation", () => {
     };
     const prisma = {
       offer: { findUnique: vi.fn().mockResolvedValue(offer) },
+      materialProfile: { findMany: vi.fn().mockResolvedValue([]) },
       pieceUnit: {
         findMany: vi
           .fn()
@@ -105,7 +106,7 @@ describe("FaconnageService partial plan validation", () => {
         {
           profile: "IPE200",
           requirements: [{ lengthMm: 3200, quantity: 1 }],
-          rawLengths: [{ lengthMm: 6000 }],
+          rawLengths: [{ lengthMm: 6000, quantity: 4 }],
         },
       ],
     });
@@ -115,6 +116,10 @@ describe("FaconnageService partial plan validation", () => {
       reference: expect.stringContaining("OFF-A"),
     });
     expect(transaction.cuttingPlan.create).toHaveBeenCalledTimes(1);
+    expect(optimizer.optimize).toHaveBeenCalledWith(expect.objectContaining({
+      profile: "IPE200",
+      rawLengths: [{ lengthMm: 6000, quantity: 4 }],
+    }));
     expect(transaction.historyEvent.create).toHaveBeenCalledTimes(1);
     expect($transaction).toHaveBeenCalledTimes(1);
   });
@@ -183,6 +188,7 @@ describe("FaconnageService partial plan validation", () => {
     };
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      materialProfile: { findMany: vi.fn().mockResolvedValue([]) },
       offer: { findUnique: vi.fn().mockResolvedValue(offer), update: vi.fn() },
       cuttingPlan: {
         findFirst: vi.fn().mockResolvedValue(plan),
@@ -320,5 +326,39 @@ describe("FaconnageService partial plan validation", () => {
     expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ eventType: "CUTTING_PLAN_CANCELLED", entityId: "plan-a" }),
     }));
+  });
+
+  it("revises a validated plan only by releasing unassigned bars and retaining an audit event", async () => {
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      offer: { findUnique: vi.fn().mockResolvedValue({ id: "offer-a", status: "READY" }), update: vi.fn().mockResolvedValue({}) },
+      cuttingPlan: { findFirst: vi.fn().mockResolvedValue({ id: "plan-a", reference: "OFF-A-CP-1", status: "VALIDATED" }), update: vi.fn().mockResolvedValue({}) },
+      cuttingBar: {
+        findMany: vi.fn().mockResolvedValue([{ id: "bar-a", reference: "OFF-A-B001", status: "FACONNEE", assignments: [], items: [{ pieceUnitId: "unit-a", pieceUnit: { id: "unit-a", status: "FACONNEE" } }] }]),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      pieceUnit: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      cuttingBarItem: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      cuttingPlanProposal: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      historyEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = { $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) => callback(transaction)) };
+    await expect(serviceWith(prisma as never).reviseValidatedPlan(actor, "offer-a", "plan-a")).resolves.toMatchObject({
+      status: "CANCELLED", cancelledBarCount: 1, releasedPieceUnitCount: 1,
+    });
+    expect(transaction.pieceUnit.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: "FACONNEE" }) }));
+    expect(transaction.cuttingPlan.update).toHaveBeenCalledWith({ where: { id: "plan-a" }, data: { status: "CANCELLED" } });
+    expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ eventType: "CUTTING_PLAN_REVISED", entityId: "plan-a" }) }));
+  });
+
+  it("refuses to revise a validated plan when any bar is assigned", async () => {
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      offer: { findUnique: vi.fn().mockResolvedValue({ id: "offer-a", status: "READY" }) },
+      cuttingPlan: { findFirst: vi.fn().mockResolvedValue({ id: "plan-a", status: "VALIDATED" }) },
+      cuttingBar: { findMany: vi.fn().mockResolvedValue([{ id: "bar-a", reference: "OFF-A-B001", status: "AFFECTEE", assignments: [{ id: "assignment-a" }], items: [] }]) },
+    };
+    const prisma = { $transaction: vi.fn(async (callback: (tx: typeof transaction) => unknown) => callback(transaction)) };
+    await expect(serviceWith(prisma as never).reviseValidatedPlan(actor, "offer-a", "plan-a")).rejects.toBeInstanceOf(ConflictException);
   });
 });

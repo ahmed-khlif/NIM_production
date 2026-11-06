@@ -1,5 +1,6 @@
-import { Inject, Injectable } from "@nestjs/common";
-import type { Prisma } from "@prisma/client";
+import { Inject, Injectable, Optional } from "@nestjs/common";
+import type { OnModuleDestroy } from "@nestjs/common";
+import { Prisma, type Prisma as PrismaTypes } from "@prisma/client";
 import type {
   DashboardDelayedPiece,
   DashboardDueDateSummary,
@@ -19,12 +20,66 @@ import type {
 import { dashboardQuerySchema, type DashboardQuery } from "@nim/validation";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { RealtimeService } from "../realtime/realtime.service";
 
-const pieceInclude = {
-  units: { include: { currentMachine: true } },
-} as const;
+const DASHBOARD_METRICS_TTL_MS = 3_000;
 
-type PieceWithUnits = Prisma.PieceGetPayload<{ include: typeof pieceInclude }>;
+const pieceSelect = {
+  id: true,
+  reference: true,
+  profile: true,
+  lengthMm: true,
+  quantity: true,
+  priority: true,
+  dueDate: true,
+  status: true,
+  _count: {
+    select: {
+      units: {
+        where: { status: { in: ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED"] } },
+      },
+    },
+  },
+  units: {
+    where: { currentMachineId: { not: null } },
+    select: { currentMachine: { select: { name: true } } },
+    take: 1,
+  },
+} satisfies PrismaTypes.PieceSelect;
+
+type PieceWithUnits = PrismaTypes.PieceGetPayload<{ select: typeof pieceSelect }>;
+type DashboardMachineRow = {
+  id: string;
+  name: string;
+  internalNumber: string;
+  type: string;
+  status: "ACTIVE" | "MAINTENANCE" | "INACTIVE";
+  _count: { assignments: number; productionOperations: number };
+};
+
+type DashboardAggregateRow = {
+  totalPieces: number;
+  totalUnits: number;
+  completedUnits: number;
+  inProductionUnits: number;
+  delayedPiecesCount: number;
+  dueTodayPieces: number;
+  dueNextSevenDaysPieces: number;
+  withoutDueDatePieces: number;
+  qualityPendingCount: number;
+  openProductionNonConformityCount: number;
+  pendingDeviationCount: number;
+  statusCounts: Array<{ status: string; count: number }>;
+  unitStatusCounts: Array<{ status: string; count: number }>;
+  priorityCounts: Array<{ priority: string; count: number }>;
+  qualityCounts: Array<{ result: string; count: number }>;
+  qualityDefectCounts: Array<{ defectCategory: string; count: number }>;
+  qualityDispositionCounts: Array<{ type: string; count: number }>;
+  productionTrendOperations: Array<{ date: string; startedUnits: number; completedUnits: number }>;
+  productionTrendQuality: Array<{ date: string; conformUnits: number; nonConformUnits: number }>;
+};
+
+type CachedDashboardAggregate = { expiresAt: number; value: DashboardAggregateRow };
 
 const dashboardStatuses: PieceStatus[] = [
   "PLANNED",
@@ -53,8 +108,29 @@ function metadataObject(value: Prisma.JsonValue | null): Record<string, unknown>
 }
 
 @Injectable()
-export class DashboardService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+export class DashboardService implements OnModuleDestroy {
+  private readonly aggregateCache = new Map<string, CachedDashboardAggregate>();
+  private readonly aggregateRequests = new Map<string, Promise<DashboardAggregateRow>>();
+  private cacheGeneration = 0;
+  private readonly unsubscribeRealtime?: () => void;
+
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() @Inject(RealtimeService) realtime?: RealtimeService,
+  ) {
+    this.unsubscribeRealtime = realtime?.subscribe(() => this.invalidateAggregateCache());
+  }
+
+  onModuleDestroy(): void {
+    this.unsubscribeRealtime?.();
+    this.invalidateAggregateCache();
+  }
+
+  private invalidateAggregateCache(): void {
+    this.cacheGeneration += 1;
+    this.aggregateCache.clear();
+    this.aggregateRequests.clear();
+  }
 
   async overview(
     _actor: AuthContext,
@@ -74,72 +150,27 @@ export class DashboardService {
     trendStart.setUTCDate(trendStart.getUTCDate() - (days - 1));
     const trendEnd = new Date(trendStart);
     trendEnd.setUTCDate(trendEnd.getUTCDate() + days);
-    const activePieceWhere = { status: { not: "ARCHIVED" as const } };
-    const duePieceWhere: Prisma.PieceWhereInput = {
-      status: { notIn: ["COMPLETED", "ARCHIVED"] },
-    };
-    const [
-      pieces,
-      totalPieces,
-      totalUnits,
-      completedUnits,
-      inProductionUnits,
-      delayedPiecesCount,
-      statusCounts,
-      machines,
-      recentEvents,
-      unitStatusCounts,
-      priorityCounts,
-      qualityCounts,
-      qualityDefectCounts,
-      qualityDispositionCounts,
-      pendingDeviationCount,
-      qualityPendingCount,
-      openProductionNonConformityCount,
-      dueTodayPieces,
-      dueNextSevenDaysPieces,
-      withoutDueDatePieces,
-      productionTrendOperations,
-      productionTrendQuality,
-    ] = await Promise.all([
+    const aggregateCacheKey = `${days}:${startOfToday.toISOString()}`;
+    const [pieces, machines, recentEvents, aggregates] = await Promise.all([
       this.prisma.piece.findMany({
-        where: activePieceWhere,
-        include: pieceInclude,
+        where: { status: { not: "ARCHIVED" } },
+        select: pieceSelect,
         orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
         take: 100,
       }),
-      this.prisma.piece.count({ where: activePieceWhere }),
-      this.prisma.pieceUnit.count({ where: { piece: activePieceWhere } }),
-      this.prisma.pieceUnit.count({
-        where: {
-          piece: activePieceWhere,
-          status: { in: ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED"] },
-        },
-      }),
-      this.prisma.pieceUnit.count({
-        where: { piece: activePieceWhere, status: "IN_PROGRESS" },
-      }),
-      this.prisma.piece.count({
-        where: {
-          dueDate: { lt: now },
-          ...duePieceWhere,
-        },
-      }),
-      this.prisma.piece.groupBy({
-        by: ["status"],
-        where: activePieceWhere,
-        _count: { _all: true },
-      }),
       this.prisma.machine.findMany({
         orderBy: [{ status: "asc" }, { name: "asc" }],
-        include: {
-          assignments: {
-            where: { active: true, pieceUnit: { status: "ASSIGNED" } },
-            select: { id: true },
-          },
-          productionOperations: {
-            where: { status: "IN_PROGRESS" },
-            select: { id: true },
+        select: {
+          id: true,
+          name: true,
+          internalNumber: true,
+          type: true,
+          status: true,
+          _count: {
+            select: {
+              assignments: { where: { active: true, pieceUnit: { status: "ASSIGNED" } } },
+              productionOperations: { where: { status: "IN_PROGRESS" } },
+            },
           },
         },
       }),
@@ -150,52 +181,13 @@ export class DashboardService {
           actor: { select: { displayName: true } },
         },
       }),
-      this.prisma.pieceUnit.groupBy({
-        by: ["status"],
-        where: { piece: activePieceWhere },
-        _count: { _all: true },
-      }),
-      this.prisma.piece.groupBy({
-        by: ["priority"],
-        where: activePieceWhere,
-        _count: { _all: true },
-      }),
-      this.prisma.qualityControl.groupBy({
-        by: ["result"],
-        where: { piece: activePieceWhere },
-        _count: { _all: true },
-      }),
-      this.prisma.qualityControl.groupBy({
-        by: ["defectCategory"],
-        where: { piece: activePieceWhere, result: "NON_CONFORM", defectCategory: { not: null } },
-        _count: { _all: true },
-      }),
-      this.prisma.qualityDisposition.groupBy({
-        by: ["type"],
-        where: { piece: activePieceWhere },
-        _count: { _all: true },
-      }),
-      this.prisma.qualityDisposition.count({
-        where: { piece: activePieceWhere, type: "DEVIATION", status: "PENDING" },
-      }),
-      this.prisma.pieceUnit.count({
-        where: { piece: activePieceWhere, status: "QUALITY_PENDING" },
-      }),
-      this.prisma.nonConformity.count({ where: { status: "OPEN" } }),
-      this.prisma.piece.count({
-        where: { ...duePieceWhere, dueDate: { gte: startOfToday, lt: endOfToday } },
-      }),
-      this.prisma.piece.count({
-        where: { ...duePieceWhere, dueDate: { gte: endOfToday, lt: endOfNextSevenDays } },
-      }),
-      this.prisma.piece.count({ where: { ...duePieceWhere, dueDate: null } }),
-      this.prisma.productionOperation.findMany({
-        where: { startedAt: { gte: trendStart, lt: trendEnd } },
-        select: { startedAt: true, completedAt: true, status: true },
-      }),
-      this.prisma.qualityControl.findMany({
-        where: { controlledAt: { gte: trendStart, lt: trendEnd } },
-        select: { controlledAt: true, result: true },
+      this.getDashboardAggregates(aggregateCacheKey, {
+        now,
+        startOfToday,
+        endOfToday,
+        endOfNextSevenDays,
+        trendStart,
+        trendEnd,
       }),
     ]);
 
@@ -216,63 +208,64 @@ export class DashboardService {
       );
 
     const machineLoads = machines.map((machine) => this.toMachineLoad(machine));
-    const progressPercent = totalUnits === 0 ? 0 : Math.round((completedUnits / totalUnits) * 100);
+    const progressPercent = aggregates.totalUnits === 0
+      ? 0
+      : Math.round((aggregates.completedUnits / aggregates.totalUnits) * 100);
     const unitStatusBreakdown = dashboardUnitStatuses.map(
       (status): DashboardUnitStatusBreakdown => ({
         status,
-        count: unitStatusCounts.find((item) => item.status === status)?._count._all ?? 0,
+        count: aggregates.unitStatusCounts.find((item) => item.status === status)?.count ?? 0,
       }),
     );
     const priorityBreakdown = dashboardPriorities.map((priority): DashboardPriorityBreakdown => ({
       priority,
-      count: priorityCounts.find((item) => item.priority === priority)?._count._all ?? 0,
+      count: aggregates.priorityCounts.find((item) => item.priority === priority)?.count ?? 0,
     }));
-    const conformUnits = qualityCounts.find((item) => item.result === "CONFORM")?._count._all ?? 0;
-    const nonConformUnits =
-      qualityCounts.find((item) => item.result === "NON_CONFORM")?._count._all ?? 0;
+    const conformUnits = aggregates.qualityCounts.find((item) => item.result === "CONFORM")?.count ?? 0;
+    const nonConformUnits = aggregates.qualityCounts.find((item) => item.result === "NON_CONFORM")?.count ?? 0;
     const inspectedUnits = conformUnits + nonConformUnits;
     const quality: DashboardQualitySummary = {
-      pendingUnits: qualityPendingCount,
+      pendingUnits: aggregates.qualityPendingCount,
       inspectedUnits,
       conformUnits,
       nonConformUnits,
       conformityRate: inspectedUnits === 0 ? 0 : Math.round((conformUnits / inspectedUnits) * 100),
-      defectBreakdown: qualityDefectCounts
+      defectBreakdown: aggregates.qualityDefectCounts
         .filter((item): item is typeof item & { defectCategory: QualityDefectCategory } =>
           Boolean(item.defectCategory),
         )
-        .map((item) => ({ category: item.defectCategory, count: item._count._all }))
+        .map((item) => ({ category: item.defectCategory, count: item.count }))
         .sort((left, right) => right.count - left.count),
-      dispositionBreakdown: qualityDispositionCounts
-        .map((item) => ({ type: item.type as QualityDispositionType, count: item._count._all }))
+      dispositionBreakdown: aggregates.qualityDispositionCounts
+        .map((item) => ({ type: item.type as QualityDispositionType, count: item.count }))
         .sort((left, right) => right.count - left.count),
-      pendingDeviationCount,
+      pendingDeviationCount: aggregates.pendingDeviationCount,
     };
     const dueDateSummary: DashboardDueDateSummary = {
-      overduePieces: delayedPiecesCount,
-      dueTodayPieces,
-      dueNextSevenDaysPieces,
-      withoutDueDatePieces,
+      overduePieces: aggregates.delayedPiecesCount,
+      dueTodayPieces: aggregates.dueTodayPieces,
+      dueNextSevenDaysPieces: aggregates.dueNextSevenDaysPieces,
+      withoutDueDatePieces: aggregates.withoutDueDatePieces,
     };
     const productionTrend = this.buildProductionTrend(
       days,
       trendStart,
-      productionTrendOperations,
-      productionTrendQuality,
+      aggregates.productionTrendOperations,
+      aggregates.productionTrendQuality,
     );
 
     return {
       summary: {
-        totalPieces,
-        totalUnits,
-        completedUnits,
+        totalPieces: aggregates.totalPieces,
+        totalUnits: aggregates.totalUnits,
+        completedUnits: aggregates.completedUnits,
         progressPercent,
-        inProductionUnits,
-        delayedPieces: delayedPiecesCount,
+        inProductionUnits: aggregates.inProductionUnits,
+        delayedPieces: aggregates.delayedPiecesCount,
         activeMachines: machines.filter((machine) => machine.status === "ACTIVE").length,
         maintenanceMachines: machines.filter((machine) => machine.status === "MAINTENANCE").length,
         totalMachines: machines.length,
-        openNonConformities: openProductionNonConformityCount,
+        openNonConformities: aggregates.openProductionNonConformityCount,
       },
       machineLoads,
       recentActivity: recentEvents.map((event) => this.toHistoryEvent(event)),
@@ -280,7 +273,7 @@ export class DashboardService {
       activePieces: mappedPieces.slice(0, 8),
       statusBreakdown: dashboardStatuses.map((status) => ({
         status,
-        count: statusCounts.find((item) => item.status === status)?._count._all ?? 0,
+        count: aggregates.statusCounts.find((item) => item.status === status)?.count ?? 0,
       })),
       unitStatusBreakdown,
       priorityBreakdown,
@@ -291,18 +284,159 @@ export class DashboardService {
     };
   }
 
+  private async getDashboardAggregates(
+    key: string,
+    window: {
+      now: Date;
+      startOfToday: Date;
+      endOfToday: Date;
+      endOfNextSevenDays: Date;
+      trendStart: Date;
+      trendEnd: Date;
+    },
+  ): Promise<DashboardAggregateRow> {
+    const cached = this.aggregateCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.aggregateRequests.get(key);
+    if (pending) return pending;
+
+    const generation = this.cacheGeneration;
+    const request = this.loadDashboardAggregates(window);
+    this.aggregateRequests.set(key, request);
+    try {
+      const value = await request;
+      if (generation === this.cacheGeneration) {
+        this.aggregateCache.set(key, { value, expiresAt: Date.now() + DASHBOARD_METRICS_TTL_MS });
+      }
+      return value;
+    } finally {
+      if (this.aggregateRequests.get(key) === request) this.aggregateRequests.delete(key);
+    }
+  }
+
+  private async loadDashboardAggregates(window: {
+    now: Date;
+    startOfToday: Date;
+    endOfToday: Date;
+    endOfNextSevenDays: Date;
+    trendStart: Date;
+    trendEnd: Date;
+  }): Promise<DashboardAggregateRow> {
+    const rows = await this.prisma.$queryRaw<DashboardAggregateRow[]>(Prisma.sql`
+      WITH "activePieces" AS MATERIALIZED (
+        SELECT "id", "status"::text AS "status", "priority"::text AS "priority", "dueDate"
+        FROM "Piece"
+        WHERE "status" <> 'ARCHIVED'
+      ),
+      "pieceStatuses" AS (
+        SELECT "status", COUNT(*)::int AS "count"
+        FROM "activePieces"
+        GROUP BY "status"
+      ),
+      "unitStatuses" AS (
+        SELECT unit."status"::text AS "status", COUNT(*)::int AS "count"
+        FROM "PieceUnit" unit
+        INNER JOIN "activePieces" piece ON piece."id" = unit."pieceId"
+        GROUP BY unit."status"
+      ),
+      "unitTotals" AS (
+        SELECT
+          COALESCE(SUM("count"), 0)::int AS "totalUnits",
+          COALESCE(SUM("count") FILTER (WHERE "status" IN ('COMPLETED', 'QUALITY_PENDING', 'ACCEPTED', 'REJECTED')), 0)::int AS "completedUnits",
+          COALESCE(SUM("count") FILTER (WHERE "status" = 'IN_PROGRESS'), 0)::int AS "inProductionUnits",
+          COALESCE(SUM("count") FILTER (WHERE "status" = 'QUALITY_PENDING'), 0)::int AS "qualityPendingCount"
+        FROM "unitStatuses"
+      ),
+      "priorities" AS (
+        SELECT "priority", COUNT(*)::int AS "count"
+        FROM "activePieces"
+        GROUP BY "priority"
+      ),
+      "qualityResults" AS (
+        SELECT control."result"::text AS "result", COUNT(*)::int AS "count"
+        FROM "QualityControl" control
+        INNER JOIN "activePieces" piece ON piece."id" = control."pieceId"
+        GROUP BY control."result"
+      ),
+      "qualityDefects" AS (
+        SELECT control."defectCategory"::text AS "defectCategory", COUNT(*)::int AS "count"
+        FROM "QualityControl" control
+        INNER JOIN "activePieces" piece ON piece."id" = control."pieceId"
+        WHERE control."result" = 'NON_CONFORM' AND control."defectCategory" IS NOT NULL
+        GROUP BY control."defectCategory"
+      ),
+      "qualityDispositions" AS (
+        SELECT disposition."type"::text AS "type", COUNT(*)::int AS "count"
+        FROM "QualityDisposition" disposition
+        INNER JOIN "activePieces" piece ON piece."id" = disposition."pieceId"
+        GROUP BY disposition."type"
+      ),
+      "operationEvents" AS (
+        SELECT TO_CHAR(DATE_TRUNC('day', "startedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               1::int AS "startedUnits", 0::int AS "completedUnits"
+        FROM "ProductionOperation"
+        WHERE "startedAt" >= ${window.trendStart} AND "startedAt" < ${window.trendEnd}
+        UNION ALL
+        SELECT TO_CHAR(DATE_TRUNC('day', "completedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               0::int AS "startedUnits", 1::int AS "completedUnits"
+        FROM "ProductionOperation"
+        WHERE "startedAt" >= ${window.trendStart} AND "startedAt" < ${window.trendEnd}
+          AND "status" = 'COMPLETED'
+          AND "completedAt" >= ${window.trendStart} AND "completedAt" < ${window.trendEnd}
+      ),
+      "operationTrend" AS (
+        SELECT "date", SUM("startedUnits")::int AS "startedUnits",
+               SUM("completedUnits")::int AS "completedUnits"
+        FROM "operationEvents"
+        GROUP BY "date"
+      ),
+      "qualityTrend" AS (
+        SELECT TO_CHAR(DATE_TRUNC('day', "controlledAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               COUNT(*) FILTER (WHERE "result" = 'CONFORM')::int AS "conformUnits",
+               COUNT(*) FILTER (WHERE "result" = 'NON_CONFORM')::int AS "nonConformUnits"
+        FROM "QualityControl"
+        WHERE "controlledAt" >= ${window.trendStart} AND "controlledAt" < ${window.trendEnd}
+        GROUP BY "date"
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM "activePieces") AS "totalPieces",
+        (SELECT "totalUnits" FROM "unitTotals") AS "totalUnits",
+        (SELECT "completedUnits" FROM "unitTotals") AS "completedUnits",
+        (SELECT "inProductionUnits" FROM "unitTotals") AS "inProductionUnits",
+        (SELECT COUNT(*)::int FROM "activePieces"
+          WHERE "dueDate" < ${window.now} AND "status" NOT IN ('COMPLETED', 'ARCHIVED')) AS "delayedPiecesCount",
+        (SELECT COUNT(*)::int FROM "activePieces"
+          WHERE "dueDate" >= ${window.startOfToday} AND "dueDate" < ${window.endOfToday}
+            AND "status" <> 'COMPLETED') AS "dueTodayPieces",
+        (SELECT COUNT(*)::int FROM "activePieces"
+          WHERE "dueDate" >= ${window.endOfToday} AND "dueDate" < ${window.endOfNextSevenDays}
+            AND "status" <> 'COMPLETED') AS "dueNextSevenDaysPieces",
+        (SELECT COUNT(*)::int FROM "activePieces"
+          WHERE "dueDate" IS NULL AND "status" <> 'COMPLETED') AS "withoutDueDatePieces",
+        (SELECT "qualityPendingCount" FROM "unitTotals") AS "qualityPendingCount",
+        (SELECT COUNT(*)::int FROM "NonConformity" WHERE "status" = 'OPEN') AS "openProductionNonConformityCount",
+        (SELECT COUNT(*)::int FROM "QualityDisposition" disposition
+          INNER JOIN "activePieces" piece ON piece."id" = disposition."pieceId"
+          WHERE disposition."type" = 'DEVIATION' AND disposition."status" = 'PENDING') AS "pendingDeviationCount",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('status', "status", 'count', "count")) FROM "pieceStatuses"), '[]'::jsonb) AS "statusCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('status', "status", 'count', "count")) FROM "unitStatuses"), '[]'::jsonb) AS "unitStatusCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('priority', "priority", 'count', "count")) FROM "priorities"), '[]'::jsonb) AS "priorityCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('result', "result", 'count', "count")) FROM "qualityResults"), '[]'::jsonb) AS "qualityCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('defectCategory', "defectCategory", 'count', "count")) FROM "qualityDefects"), '[]'::jsonb) AS "qualityDefectCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('type', "type", 'count', "count")) FROM "qualityDispositions"), '[]'::jsonb) AS "qualityDispositionCounts",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('date', "date", 'startedUnits', "startedUnits", 'completedUnits', "completedUnits")) FROM "operationTrend"), '[]'::jsonb) AS "productionTrendOperations",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('date', "date", 'conformUnits', "conformUnits", 'nonConformUnits', "nonConformUnits")) FROM "qualityTrend"), '[]'::jsonb) AS "productionTrendQuality"
+    `);
+    const result = rows[0];
+    if (!result) throw new Error("Dashboard aggregation returned no result row.");
+    return result;
+  }
+
   private buildProductionTrend(
     days: DashboardQuery["days"],
     start: Date,
-    operations: Array<{
-      startedAt: Date;
-      completedAt: Date | null;
-      status: "IN_PROGRESS" | "COMPLETED";
-    }>,
-    qualityControls: Array<{
-      controlledAt: Date;
-      result: "CONFORM" | "NON_CONFORM";
-    }>,
+    operations: Array<{ date: string; startedUnits: number; completedUnits: number }>,
+    qualityControls: Array<{ date: string; conformUnits: number; nonConformUnits: number }>,
   ): DashboardTrendPoint[] {
     const points = Array.from({ length: days }, (_, index) => {
       const date = new Date(start);
@@ -318,26 +452,21 @@ export class DashboardService {
     const byDate = new Map(points.map((point) => [point.date, point]));
 
     for (const operation of operations) {
-      const started = byDate.get(operation.startedAt.toISOString().slice(0, 10));
-      if (started) started.startedUnits += 1;
-      if (operation.status === "COMPLETED" && operation.completedAt) {
-        const completed = byDate.get(operation.completedAt.toISOString().slice(0, 10));
-        if (completed) completed.completedUnits += 1;
-      }
+      const point = byDate.get(operation.date);
+      if (!point) continue;
+      point.startedUnits = operation.startedUnits;
+      point.completedUnits = operation.completedUnits;
     }
     for (const control of qualityControls) {
-      const point = byDate.get(control.controlledAt.toISOString().slice(0, 10));
+      const point = byDate.get(control.date);
       if (!point) continue;
-      if (control.result === "CONFORM") point.conformUnits += 1;
-      else point.nonConformUnits += 1;
+      point.conformUnits = control.conformUnits;
+      point.nonConformUnits = control.nonConformUnits;
     }
     return points;
   }
 
   private toDashboardPiece(piece: PieceWithUnits): DashboardPiece {
-    const completedUnits = piece.units.filter((unit) =>
-      ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED"].includes(unit.status),
-    ).length;
     const machineName =
       piece.units.find((unit) => unit.currentMachine)?.currentMachine?.name ?? null;
     return {
@@ -346,7 +475,7 @@ export class DashboardService {
       profile: piece.profile,
       lengthMm: piece.lengthMm,
       quantity: piece.quantity,
-      completedUnits,
+      completedUnits: piece._count.units,
       priority: piece.priority,
       dueDate: piece.dueDate?.toISOString() ?? null,
       status: piece.status,
@@ -354,18 +483,9 @@ export class DashboardService {
     };
   }
 
-  private toMachineLoad(machine: {
-    id: string;
-    name: string;
-    internalNumber: string;
-    type: string;
-    status: "ACTIVE" | "MAINTENANCE" | "INACTIVE";
-    assignments: Array<{ id: string }>;
-    productionOperations: Array<{ id: string }>;
-  }): DashboardMachineLoad {
-    const queueCount = machine.assignments.length;
-    const inProgressCount = machine.productionOperations.length;
-    const totalWork = queueCount + inProgressCount;
+  private toMachineLoad(machine: DashboardMachineRow): DashboardMachineLoad {
+    const queueCount = machine._count.assignments;
+    const inProgressCount = machine._count.productionOperations;
     return {
       id: machine.id,
       name: machine.name,
@@ -374,8 +494,6 @@ export class DashboardService {
       status: machine.status,
       queueCount,
       inProgressCount,
-      utilization:
-        totalWork === 0 ? 0 : Math.min(100, Math.round((inProgressCount / totalWork) * 100)),
     };
   }
 

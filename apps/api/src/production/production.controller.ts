@@ -29,4 +29,13 @@ export class ProductionController {
   complete(@CurrentAuth() actor: AuthContext, @Param("operationId") operationId: string) {
     return this.productionService.finish(actor, operationId).then((operation) => ({ operation }));
   }
+
+  @Post("operators/:operatorId/machine-session/end")
+  @Roles("ADMIN")
+  endOperatorMachineSession(
+    @CurrentAuth() actor: AuthContext,
+    @Param("operatorId") operatorId: string,
+  ) {
+    return this.productionService.endMachineSessionByAdmin(actor, operatorId);
+  }
 }

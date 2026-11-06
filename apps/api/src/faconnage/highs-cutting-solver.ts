@@ -22,6 +22,11 @@ export interface MipPatternResult {
   runtimeMs: number;
 }
 
+export interface RawStockLimit {
+  lengthMm: number;
+  quantity: number;
+}
+
 type HighsSolution = {
   rowDual?: ArrayLike<number>;
   colValue?: ArrayLike<number>;
@@ -86,6 +91,7 @@ function addPatternColumn(
   cost: number,
   integer: boolean,
   upperBound: number,
+  stockRows?: Map<number, number>,
 ): void {
   const indices: number[] = [];
   const values: number[] = [];
@@ -93,6 +99,11 @@ function addPatternColumn(
     if (pattern.cuts[index] <= 0) continue;
     indices.push(index);
     values.push(pattern.cuts[index]);
+  }
+  const stockRow = stockRows?.get(pattern.rawLengthMm);
+  if (stockRow !== undefined) {
+    indices.push(stockRow);
+    values.push(1);
   }
 
   const columnIndex = model.getNumCol();
@@ -164,6 +175,7 @@ export class HighsCuttingSolver {
     patterns: SolverPattern[],
     costs: number[],
     timeLimitSeconds = 12,
+    rawStockLimits: RawStockLimit[] = [],
   ): Promise<MipPatternResult | null> {
     const highs = await loadHighsRuntime();
     if (!highs || patterns.length === 0) return null;
@@ -178,9 +190,15 @@ export class HighsCuttingSolver {
         mip_rel_gap: 0,
       });
       addMasterRows(model, requirements);
+      const stockRows = new Map<number, number>();
+      rawStockLimits.forEach((limit, index) => {
+        const rowIndex = requirements.length + index;
+        stockRows.set(limit.lengthMm, rowIndex);
+        model.addRow(0, limit.quantity, { indices: [], values: [] });
+      });
       const upperBound = requirements.reduce((sum, item) => sum + item.quantity, 0);
       patterns.forEach((pattern, index) => {
-        addPatternColumn(model, highs, pattern, costs[index], true, upperBound);
+        addPatternColumn(model, highs, pattern, costs[index], true, upperBound, stockRows);
       });
 
       model.run();

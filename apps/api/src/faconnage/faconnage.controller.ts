@@ -55,6 +55,15 @@ export class FaconnageController {
     return { plan: await this.faconnageService.cancelPlan(actor, offerId, planId) };
   }
 
+  @Post("plans/:planId/revise")
+  async revise(
+    @CurrentAuth() actor: AuthContext,
+    @Param("offerId") offerId: string,
+    @Param("planId") planId: string,
+  ) {
+    return { plan: await this.faconnageService.reviseValidatedPlan(actor, offerId, planId) };
+  }
+
   @Delete("plans/:planId")
   async delete(
     @CurrentAuth() actor: AuthContext,

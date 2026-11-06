@@ -11,9 +11,14 @@ export type AuthenticatedUser = {
 export type ManagedUser = AuthenticatedUser & {
   isActive: boolean;
   tabletAccessEnabled: boolean;
-  hasConnectionKey: boolean;
   createdAt: string;
   lastLoginAt: string | null;
+  activeMachineSession?: {
+    id: string;
+    machineName: string;
+    startedAt: string;
+    runningBarReference: string | null;
+  } | null;
 };
 
 export type MachineStatus = "ACTIVE" | "MAINTENANCE" | "INACTIVE";
@@ -48,12 +53,7 @@ export type PieceUnitStatus =
 export type PieceProductionStatus = "PENDING" | "FACONNEE" | "AFFECTEE" | "LANCEE" | "FABRIQUEE";
 export type QualityStatus = "NOT_INSPECTED" | "CONFORME" | "NON_CONFORME";
 export type CuttingPlanStatus =
-  | "DRAFT"
-  | "APPROVED"
-  | "PARTIALLY_VALIDATED"
-  | "VALIDATED"
-  | "CANCELLED"
-  | "ARCHIVED";
+  "DRAFT" | "APPROVED" | "PARTIALLY_VALIDATED" | "VALIDATED" | "CANCELLED" | "ARCHIVED";
 export type CuttingPlanProposalStatus = "PROPOSED" | "VALIDATED" | "CANCELLED";
 
 export type CuttingPlanBarProposal = {
@@ -72,7 +72,6 @@ export type CuttingPlanBarProposal = {
 };
 
 export type OperatorIdentity = Pick<AuthenticatedUser, "id" | "displayName">;
-export type TabletConnectionKeyResult = { user: ManagedUser; connectionKey: string };
 export type MachineSessionMember = OperatorIdentity & { role: "LEAD" | "HELPER" };
 export type ProductionNonConformityReason =
   "DIMENSION" | "CUTTING_ERROR" | "DRILLING_ERROR" | "MATERIAL_DEFECT" | "DEFORMATION" | "OTHER";
@@ -105,14 +104,16 @@ export type ProductionRunSummary = {
   barReference: string;
   profile: string;
   rawLengthMm: number;
-  status: "RUNNING" | "COMPLETED";
+  status: "RUNNING" | "COMPLETED" | "CANCELLED";
   machineId: string;
   machineName: string;
   machineInternalNumber: string;
   machineSessionId: string;
   startedByOperatorId: string;
+  startedBy: OperatorIdentity;
   startedAt: string;
   finishedAt: string | null;
+  cancelledAt?: string | null;
   team: MachineSessionMember[];
   pieceCount: number;
   openNonConformityCount: number;
@@ -222,6 +223,16 @@ export type PieceDetail = ManagedPiece & {
 
 export type ProfileFamily = "IPE" | "HEA" | "UPN" | "L" | "ROND" | "OTHER";
 
+export type MaterialProfileCatalogItem = {
+  id: string;
+  profile: string;
+  aliases?: string[];
+  kgPerMeter: number;
+  rawLengthsMm: number[];
+  isActive: boolean;
+  updatedAt: string;
+};
+
 export type AvailableProfile = {
   profile: string;
   family: ProfileFamily;
@@ -250,6 +261,7 @@ export type FaconnagePreparation = {
 export type PieceImportRow = {
   row: number;
   values: Record<string, string | number | undefined>;
+  canonicalProfile?: string;
   valid: boolean;
   errors: string[];
   warnings: string[];
@@ -274,8 +286,6 @@ export type PieceImportPreview = {
 };
 
 export type PieceImportResult = {
-  batchId: string;
-  filename: string;
   sourceFormat: "CSV" | "TEKLA_XLS" | "XLSX";
   status: "COMMITTED" | "FAILED";
   rowsTotal: number;
@@ -295,8 +305,18 @@ export type ManagedNotification = {
   eventType: string;
   title: string;
   message: string;
+  actorName: string | null;
+  href: string;
+  offerId: string | null;
+  readAt: string | null;
   createdAt: string;
-  read: boolean;
+};
+
+export type ManagedNotificationsPage = {
+  notifications: ManagedNotification[];
+  unreadCount: number;
+  eventTypes: string[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
 
 export type RealtimeEvent = {
@@ -375,8 +395,10 @@ export type ProductionQueueItem = {
 
 export type MachineDetail = ManagedMachine & {
   queue: ProductionQueueItem[];
+  queuePagination: PageMetadata;
   activeOperationCount: number;
   cuttingBars: MachineCuttingBar[];
+  cuttingBarsPagination: PageMetadata;
   barMetrics: {
     assigned: number;
     inProgress: number;
@@ -386,6 +408,8 @@ export type MachineDetail = ManagedMachine & {
   activeSession?: MachineSessionSummary | null;
   currentProductionRun?: ProductionRunSummary | null;
 };
+
+export type PageMetadata = { page: number; pageSize: number; total: number; totalPages: number };
 
 export type MachineCuttingBar = {
   id: string;
@@ -538,7 +562,6 @@ export type DashboardMachineLoad = {
   status: MachineStatus;
   queueCount: number;
   inProgressCount: number;
-  utilization: number;
 };
 
 export type DashboardPiece = {
@@ -659,3 +682,9 @@ export type ProductionPiece = {
   priority: "Haute" | "Normale" | "Basse";
   dueDate: string;
 };
+export {
+  historyEntityLabel,
+  historyEntityTypes,
+  historyEventLabel,
+  historyEventTypes,
+} from "./history-labels";

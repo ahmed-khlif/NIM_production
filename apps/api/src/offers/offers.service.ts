@@ -1,14 +1,17 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
+import { parseListSort } from "../list-sorting";
 
 const offerReference = z
   .string()
@@ -21,6 +24,7 @@ const createOfferSchema = z.object({
   reference: offerReference,
   revision: z.string().trim().min(1).max(20).default("A"),
   name: z.string().trim().min(2).max(160),
+  clientId: z.string().trim().min(1).max(128).optional().nullable(),
   clientName: z.string().trim().max(160).optional().nullable(),
   site: z.string().trim().max(160).optional().nullable(),
   description: z.string().trim().max(1200).optional().nullable(),
@@ -29,10 +33,15 @@ const createOfferSchema = z.object({
 const updateOfferSchema = z.object({
   revision: z.string().trim().min(1).max(20).optional(),
   name: z.string().trim().min(2).max(160).optional(),
+  clientId: z.string().trim().min(1).max(128).optional().nullable(),
   clientName: z.string().trim().max(160).optional().nullable(),
   site: z.string().trim().max(160).optional().nullable(),
   description: z.string().trim().max(1200).optional().nullable(),
   status: z.enum(["DRAFT", "READY", "IN_PRODUCTION", "COMPLETED"]).optional(),
+});
+
+const overrideOfferStatusSchema = z.object({
+  status: z.enum(["DRAFT", "READY", "IN_PRODUCTION", "COMPLETED"]),
 });
 
 type OfferStatusValue = "DRAFT" | "READY" | "IN_PRODUCTION" | "COMPLETED" | "ARCHIVED";
@@ -45,13 +54,15 @@ type OfferListOptions = {
   status?: string;
   clientName?: string;
   site?: string;
+  sortBy?: string;
+  sortDirection?: string;
 };
 
 type OfferPieceMetric = {
-  id: string;
   offerId: string;
-  quantity: number;
   profile: string;
+  pieceRows: number;
+  totalUnits: number;
 };
 
 type OfferPlanMetric = {
@@ -95,6 +106,10 @@ function normalizeRevision(revision: string): string {
   return revision.trim().toUpperCase();
 }
 
+function normalizeClientName(value: string): string {
+  return value.normalize("NFKC").trim().toLocaleLowerCase("fr-FR").replace(/\s+/g, " ");
+}
+
 @Injectable()
 export class OffersService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
@@ -105,6 +120,41 @@ export class OffersService {
       throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
     }
     return offer;
+  }
+
+  private async resolveClient(
+    input: { clientId?: string | null; clientName?: string | null },
+    allowedArchivedClientId?: string,
+  ) {
+    if (input.clientId !== undefined) {
+      if (input.clientId === null) return null;
+      const client = await this.prisma.client.findFirst({
+        where: {
+          id: input.clientId,
+          ...(input.clientId === allowedArchivedClientId ? {} : { archivedAt: null }),
+        },
+        select: { id: true, name: true },
+      });
+      if (!client)
+        throw new BadRequestException({
+          code: "CLIENT_NOT_AVAILABLE",
+          message: "Sélectionnez un client actif dans le répertoire.",
+        });
+      return client;
+    }
+    const legacyName = cleanNullable(input.clientName);
+    if (!legacyName) return null;
+    const client = await this.prisma.client.findUnique({
+      where: { nameKey: normalizeClientName(legacyName) },
+      select: { id: true, name: true, archivedAt: true },
+    });
+    if (!client || client.archivedAt) {
+      throw new BadRequestException({
+        code: "CLIENT_SELECTION_REQUIRED",
+        message: "Choisissez un client enregistré ou créez sa fiche avant d’enregistrer l’affaire.",
+      });
+    }
+    return { id: client.id, name: client.name };
   }
 
   async assertActive(id: string): Promise<void> {
@@ -120,62 +170,72 @@ export class OffersService {
   private async metricsFor(offerIds: string[]): Promise<{
     pieces: OfferPieceMetric[];
     plans: OfferPlanMetric[];
-    manufacturedByPiece: Map<string, number>;
+    manufacturedByOffer: Map<string, number>;
     validatedByPlan: Map<string, number>;
   }> {
-    if (offerIds.length === 0) return { pieces: [], plans: [], manufacturedByPiece: new Map(), validatedByPlan: new Map() };
-    const [pieces, plans] = await Promise.all([
-      this.prisma.piece.findMany({
+    if (offerIds.length === 0) {
+      return { pieces: [], plans: [], manufacturedByOffer: new Map(), validatedByPlan: new Map() };
+    }
+    const [pieceGroups, manufacturedGroups, plans] = await Promise.all([
+      this.prisma.piece.groupBy({
+        by: ["offerId", "profile"],
         where: { offerId: { in: offerIds }, status: { not: "ARCHIVED" } },
-        select: {
-          id: true,
-          offerId: true,
-          quantity: true,
-          profile: true,
-        },
+        _count: { _all: true },
+        _sum: { quantity: true },
       }),
-      this.prisma.cuttingPlan.findMany({
-        where: { offerId: { in: offerIds }, status: { not: "ARCHIVED" } },
-        select: {
-          id: true,
-          offerId: true,
-          reference: true,
-          status: true,
-          totalBars: true,
-          totalWasteMm: true,
-          utilizationRate: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "desc" },
-      }),
+      this.prisma.$queryRaw<Array<{ offerId: string; count: number }>>(Prisma.sql`
+        SELECT p."offerId" AS "offerId", COUNT(pu."id")::int AS "count"
+        FROM "Piece" p
+        INNER JOIN "PieceUnit" pu ON pu."pieceId" = p."id"
+        WHERE p."offerId" IN (${Prisma.join(offerIds)})
+          AND p."status" <> 'ARCHIVED'
+          AND pu."manufacturedAt" IS NOT NULL
+        GROUP BY p."offerId"
+      `),
+      this.prisma.$queryRaw<OfferPlanMetric[]>(Prisma.sql`
+        WITH ranked AS (
+          SELECT "id", "offerId", "reference", "status", "totalBars", "totalWasteMm",
+                 "utilizationRate", "createdAt",
+                 ROW_NUMBER() OVER (
+                   PARTITION BY "offerId"
+                   ORDER BY CASE "status"
+                     WHEN 'VALIDATED' THEN 0
+                     WHEN 'PARTIALLY_VALIDATED' THEN 1
+                     WHEN 'APPROVED' THEN 2
+                     ELSE 3
+                   END, "createdAt" DESC, "id" ASC
+                 ) AS rank
+          FROM "CuttingPlan"
+          WHERE "offerId" IN (${Prisma.join(offerIds)}) AND "status" <> 'ARCHIVED'
+        )
+        SELECT "id", "offerId", "reference", "status", "totalBars", "totalWasteMm",
+               "utilizationRate", "createdAt"
+        FROM ranked WHERE rank = 1
+      `),
     ]);
-    const [unitGroups, proposalGroups] = await Promise.all([
-      pieces.length
-        ? this.prisma.pieceUnit.groupBy({
-            by: ["pieceId"],
-            where: {
-              pieceId: { in: pieces.map((piece) => piece.id) },
-              manufacturedAt: { not: null },
-            },
-            _count: { _all: true },
-          })
-        : Promise.resolve([]),
-      plans.length
-        ? this.prisma.cuttingPlanProposal.groupBy({
-            by: ["cuttingPlanId"],
-            where: {
-              cuttingPlanId: { in: plans.map((plan) => plan.id) },
-              status: "VALIDATED",
-            },
-            _count: { _all: true },
-          })
-        : Promise.resolve([]),
-    ]);
+    const pieces = pieceGroups.map((group) => ({
+      offerId: group.offerId,
+      profile: group.profile,
+      pieceRows: group._count._all,
+      totalUnits: group._sum.quantity ?? 0,
+    }));
+    const partialPlanIds = plans
+      .filter((plan) => plan.status === "PARTIALLY_VALIDATED")
+      .map((plan) => plan.id);
+    const proposalGroups = partialPlanIds.length
+      ? await this.prisma.cuttingPlanProposal.groupBy({
+          by: ["cuttingPlanId"],
+          where: { cuttingPlanId: { in: partialPlanIds }, status: "VALIDATED" },
+          _count: { _all: true },
+        })
+      : [];
     return {
       pieces,
       plans,
-      manufacturedByPiece: new Map(unitGroups.map((group) => [group.pieceId, group._count._all])),
-      validatedByPlan: new Map(proposalGroups.map((group) => [group.cuttingPlanId, group._count._all])),
+      manufacturedByOffer: new Map(manufacturedGroups.map((group) => [group.offerId, group.count])),
+      validatedByPlan: new Map(
+        proposalGroups.map((group) => [group.cuttingPlanId, group._count._all]),
+      ),
     };
   }
 
@@ -183,24 +243,17 @@ export class OffersService {
     offerId: string,
     pieces: OfferPieceMetric[],
     plans: OfferPlanMetric[],
-    manufacturedByPiece: Map<string, number>,
+    manufacturedByOffer: Map<string, number>,
     validatedByPlan: Map<string, number>,
   ) {
     const scopedPieces = pieces.filter((piece) => piece.offerId === offerId);
-    const totalUnits = scopedPieces.reduce((sum, piece) => sum + piece.quantity, 0);
-    const manufacturedUnits = scopedPieces.reduce(
-      (sum, piece) => sum + (manufacturedByPiece.get(piece.id) ?? 0),
-      0,
-    );
+    const pieceRows = scopedPieces.reduce((sum, piece) => sum + piece.pieceRows, 0);
+    const totalUnits = scopedPieces.reduce((sum, piece) => sum + piece.totalUnits, 0);
+    const manufacturedUnits = manufacturedByOffer.get(offerId) ?? 0;
     const profiles = new Set(scopedPieces.map((piece) => piece.profile.trim().toUpperCase()));
-    const latestPlan =
-      plans.find((plan) => plan.offerId === offerId && plan.status === "VALIDATED") ??
-      plans.find((plan) => plan.offerId === offerId && plan.status === "PARTIALLY_VALIDATED") ??
-      plans.find((plan) => plan.offerId === offerId && plan.status === "APPROVED") ??
-      plans.find((plan) => plan.offerId === offerId) ??
-      null;
+    const latestPlan = plans.find((plan) => plan.offerId === offerId) ?? null;
     return {
-      pieceRows: scopedPieces.length,
+      pieceRows,
       totalUnits,
       manufacturedUnits,
       profileCount: profiles.size,
@@ -228,61 +281,108 @@ export class OffersService {
     const search = options.search?.trim();
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
-    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || ![10, 20, 50].includes(pageSize)) {
-      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination des offres est invalide." });
+    if (
+      !Number.isInteger(page) ||
+      page < 1 ||
+      page > 1_000_000 ||
+      !Number.isInteger(pageSize) ||
+      ![10, 20, 50].includes(pageSize)
+    ) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "La pagination des offres est invalide.",
+      });
+    }
+    const offerStatuses = ["DRAFT", "READY", "IN_PRODUCTION", "COMPLETED", "ARCHIVED"];
+    if (options.status && !offerStatuses.includes(options.status)) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Le filtre de statut d’offre est invalide.",
+      });
+    }
+    if (search && search.length > 80) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "La recherche est trop longue.",
+      });
     }
     const where: Prisma.OfferWhereInput = {
-        ...(options.includeArchived ? {} : { status: { not: "ARCHIVED" } }),
-        ...(options.status ? { status: options.status as Prisma.EnumOfferStatusFilter["equals"] } : {}),
-        ...(options.clientName ? { clientName: options.clientName } : {}),
-        ...(options.site ? { site: options.site } : {}),
-        ...(search
-          ? {
-              OR: [
-                { reference: { contains: search, mode: "insensitive" } },
-                { name: { contains: search, mode: "insensitive" } },
-                { clientName: { contains: search, mode: "insensitive" } },
-                { site: { contains: search, mode: "insensitive" } },
-              ],
-            }
-          : {}),
-      };
+      ...(options.includeArchived ? {} : { status: { not: "ARCHIVED" } }),
+      ...(options.status
+        ? { status: options.status as Prisma.EnumOfferStatusFilter["equals"] }
+        : {}),
+      ...(options.clientName ? { clientName: options.clientName } : {}),
+      ...(options.site ? { site: options.site } : {}),
+      ...(search
+        ? {
+            OR: [
+              { reference: { contains: search, mode: "insensitive" } },
+              { name: { contains: search, mode: "insensitive" } },
+              { clientName: { contains: search, mode: "insensitive" } },
+              { site: { contains: search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "name", "clientName", "site", "status", "createdAt", "updatedAt"] as const, { sortBy: "status", sortDirection: "asc" });
+    const orderBy: Prisma.OfferOrderByWithRelationInput[] = [
+      { [sort.sortBy]: sort.sortDirection },
+      { id: "asc" },
+    ];
     const [offers, total, clientGroups, siteGroups] = await Promise.all([
       this.prisma.offer.findMany({
         where,
-        orderBy: [{ status: "asc" }, { updatedAt: "desc" }, { id: "asc" }],
+        orderBy,
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
       this.prisma.offer.count({ where }),
-      this.prisma.offer.groupBy({ by: ["clientName"], where: options.includeArchived ? {} : { status: { not: "ARCHIVED" } } }),
-      this.prisma.offer.groupBy({ by: ["site"], where: options.includeArchived ? {} : { status: { not: "ARCHIVED" } } }),
+      this.prisma.offer.groupBy({
+        by: ["clientName"],
+        where: options.includeArchived ? {} : { status: { not: "ARCHIVED" } },
+      }),
+      this.prisma.offer.groupBy({
+        by: ["site"],
+        where: options.includeArchived ? {} : { status: { not: "ARCHIVED" } },
+      }),
     ]);
-    const { pieces, plans, manufacturedByPiece, validatedByPlan } = await this.metricsFor(offers.map((offer) => offer.id));
-    return { offers: offers.map((offer) => ({
-      id: offer.id,
-      reference: offer.reference,
-      revision: offer.revision,
-      name: offer.name,
-      clientName: offer.clientName,
-      site: offer.site,
-      description: offer.description,
-      status: offer.status as OfferStatusValue,
-      archivedAt: offer.archivedAt?.toISOString() ?? null,
-      createdAt: offer.createdAt.toISOString(),
-      updatedAt: offer.updatedAt.toISOString(),
-      ...this.buildMetrics(offer.id, pieces, plans, manufacturedByPiece, validatedByPlan),
-    })), pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+    const { pieces, plans, manufacturedByOffer, validatedByPlan } = await this.metricsFor(
+      offers.map((offer) => offer.id),
+    );
+    return {
+      offers: offers.map((offer) => ({
+        id: offer.id,
+        reference: offer.reference,
+        revision: offer.revision,
+        name: offer.name,
+        clientName: offer.clientName,
+        clientId: offer.clientId,
+        site: offer.site,
+        description: offer.description,
+        status: offer.status as OfferStatusValue,
+        archivedAt: offer.archivedAt?.toISOString() ?? null,
+        createdAt: offer.createdAt.toISOString(),
+        updatedAt: offer.updatedAt.toISOString(),
+        ...this.buildMetrics(offer.id, pieces, plans, manufacturedByOffer, validatedByPlan),
+      })),
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+      sorting: sort,
       facets: {
-        clients: clientGroups.map((group) => group.clientName).filter((value): value is string => Boolean(value)).sort((a, b) => a.localeCompare(b, "fr")),
-        sites: siteGroups.map((group) => group.site).filter((value): value is string => Boolean(value)).sort((a, b) => a.localeCompare(b, "fr")),
+        clients: clientGroups
+          .map((group) => group.clientName)
+          .filter((value): value is string => Boolean(value))
+          .sort((a, b) => a.localeCompare(b, "fr")),
+        sites: siteGroups
+          .map((group) => group.site)
+          .filter((value): value is string => Boolean(value))
+          .sort((a, b) => a.localeCompare(b, "fr")),
       },
     };
   }
 
   async get(id: string) {
     const offer = await this.findRecord(id);
-    const [pieceGroups, manufacturedUnits, preferredPlans, latestPlan, recentPlans, recentImports] =
+    const [pieceGroups, manufacturedUnits, preferredPlans, latestPlan, recentPlans] =
       await Promise.all([
         this.prisma.piece.groupBy({
           by: ["profile"],
@@ -313,21 +413,6 @@ export class OffersService {
         this.prisma.cuttingPlan.findMany({
           where: { offerId: id, status: { not: "ARCHIVED" } },
           select: offerDetailPlanSelect,
-          orderBy: { createdAt: "desc" },
-          take: 5,
-        }),
-        this.prisma.importBatch.findMany({
-          where: { offerId: id },
-          select: {
-            id: true,
-            filename: true,
-            status: true,
-            rowsTotal: true,
-            rowsCreated: true,
-            rowsRejected: true,
-            createdAt: true,
-            completedAt: true,
-          },
           orderBy: { createdAt: "desc" },
           take: 5,
         }),
@@ -374,6 +459,7 @@ export class OffersService {
       revision: offer.revision,
       name: offer.name,
       clientName: offer.clientName,
+      clientId: offer.clientId,
       site: offer.site,
       description: offer.description,
       status: offer.status as OfferStatusValue,
@@ -381,61 +467,121 @@ export class OffersService {
       createdAt: offer.createdAt.toISOString(),
       updatedAt: offer.updatedAt.toISOString(),
       ...offerMetrics,
-      recentImports: recentImports.map((batch) => ({
-        ...batch,
-        createdAt: batch.createdAt.toISOString(),
-        completedAt: batch.completedAt?.toISOString() ?? null,
-      })),
       cuttingPlans,
     };
   }
 
-  async getProductionSummary(id: string) {
+  async getProductionSummary(
+    id: string,
+    options: { page?: number; pageSize?: number; search?: string; status?: string; sortBy?: string; sortDirection?: string } = {},
+  ) {
     const offer = await this.findRecord(id);
-    const [pieces, unitGroups, activeAssignments, activeOperations, pendingQuality] =
-      await Promise.all([
-        this.prisma.piece.findMany({
-          where: { offerId: id, status: { not: "ARCHIVED" } },
-          select: {
-            id: true,
-            reference: true,
-            profile: true,
-            quantity: true,
-            status: true,
-            units: { select: { status: true } },
-          },
-          orderBy: [{ status: "asc" }, { reference: "asc" }],
-        }),
-        this.prisma.pieceUnit.groupBy({
-          by: ["status"],
-          where: { piece: { offerId: id, status: { not: "ARCHIVED" } } },
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    if (
+      !Number.isInteger(page) ||
+      page < 1 ||
+      !Number.isInteger(pageSize) ||
+      ![10, 20, 50].includes(pageSize)
+    ) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "La pagination de l’avancement est invalide.",
+      });
+    }
+    const search = options.search?.trim();
+    const pieceStatuses = ["PLANNED", "ASSIGNED", "IN_PROGRESS", "COMPLETED", "DELAYED"];
+    if (search && search.length > 80)
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "La recherche est trop longue.",
+      });
+    if (options.status && !pieceStatuses.includes(options.status))
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Le filtre de statut de pièce est invalide.",
+      });
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "profile", "quantity"] as const, { sortBy: "profile", sortDirection: "asc" });
+    const allPiecesWhere: Prisma.PieceWhereInput = { offerId: id, status: { not: "ARCHIVED" } };
+    const filteredPiecesWhere: Prisma.PieceWhereInput = {
+      ...allPiecesWhere,
+      ...(options.status
+        ? { status: options.status as Prisma.EnumPieceStatusFilter["equals"] }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              { reference: { contains: search, mode: "insensitive" } },
+              { profile: { contains: search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
+    const [
+      pieces,
+      pieceRows,
+      filteredPieceRows,
+      unitGroups,
+      totalUnitsAggregate,
+      activeAssignments,
+      activeOperations,
+      pendingQuality,
+    ] = await Promise.all([
+      this.prisma.piece.findMany({
+        where: filteredPiecesWhere,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          reference: true,
+          profile: true,
+          quantity: true,
+          status: true,
+        },
+        orderBy: options.sortBy
+          ? [{ [sort.sortBy]: sort.sortDirection }, { id: "asc" }]
+          : [{ profile: "asc" }, { reference: "asc" }, { id: "asc" }],
+      }),
+      this.prisma.piece.count({ where: allPiecesWhere }),
+      search || options.status
+        ? this.prisma.piece.count({ where: filteredPiecesWhere })
+        : this.prisma.piece.count({ where: allPiecesWhere }),
+      this.prisma.pieceUnit.groupBy({
+        by: ["status"],
+        where: { piece: { offerId: id, status: { not: "ARCHIVED" } } },
+        _count: { _all: true },
+      }),
+      this.prisma.piece.aggregate({ where: allPiecesWhere, _sum: { quantity: true } }),
+      this.prisma.assignment.count({
+        where: { active: true, pieceUnit: { piece: { offerId: id } } },
+      }),
+      this.prisma.productionOperation.count({
+        where: { status: "IN_PROGRESS", piece: { offerId: id } },
+      }),
+      this.prisma.pieceUnit.count({
+        where: { status: "QUALITY_PENDING", piece: { offerId: id, status: { not: "ARCHIVED" } } },
+      }),
+    ]);
+
+    const perPieceGroups = pieces.length
+      ? await this.prisma.pieceUnit.groupBy({
+          by: ["pieceId", "status"],
+          where: { pieceId: { in: pieces.map((piece) => piece.id) } },
           _count: { _all: true },
-        }),
-        this.prisma.assignment.count({
-          where: { active: true, pieceUnit: { piece: { offerId: id } } },
-        }),
-        this.prisma.productionOperation.count({
-          where: { status: "IN_PROGRESS", piece: { offerId: id } },
-        }),
-        this.prisma.pieceUnit.count({
-          where: { status: "QUALITY_PENDING", piece: { offerId: id, status: { not: "ARCHIVED" } } },
-        }),
-      ]);
+        })
+      : [];
 
     const statusCounts = Object.fromEntries(
       unitGroups.map((group) => [group.status, group._count._all]),
     ) as Record<string, number>;
-    const totalUnits = pieces.reduce((sum, piece) => sum + piece.quantity, 0);
-    const manufacturedUnits = pieces.reduce(
-      (sum, piece) =>
-        sum +
-        piece.units.filter((unit) =>
-          ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED", "SCRAPPED"].includes(
-            unit.status,
-          ),
-        ).length,
-      0,
-    );
+    const totalUnits = totalUnitsAggregate._sum.quantity ?? 0;
+    const manufacturedUnits = [
+      "COMPLETED",
+      "QUALITY_PENDING",
+      "ACCEPTED",
+      "REJECTED",
+      "SCRAPPED",
+    ].reduce((sum, status) => sum + (statusCounts[status] ?? 0), 0);
     const acceptedUnits = statusCounts.ACCEPTED ?? 0;
     const scrappedUnits = statusCounts.SCRAPPED ?? 0;
     const resolvedUnits = acceptedUnits + scrappedUnits;
@@ -447,7 +593,7 @@ export class OffersService {
         status: offer.status as OfferStatusValue,
       },
       totals: {
-        pieceRows: pieces.length,
+        pieceRows,
         totalUnits,
         manufacturedUnits,
         resolvedUnits,
@@ -460,15 +606,24 @@ export class OffersService {
         completionRate: percentage(resolvedUnits, totalUnits),
       },
       statusCounts,
+      pagination: {
+        page,
+        pageSize,
+        total: filteredPieceRows,
+        totalPages: Math.max(1, Math.ceil(filteredPieceRows / pageSize)),
+      },
       pieces: pieces.map((piece) => {
-        const completedUnits = piece.units.filter((unit) =>
-          ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED", "SCRAPPED"].includes(
-            unit.status,
-          ),
-        ).length;
-        const resolved = piece.units.filter((unit) =>
-          ["ACCEPTED", "SCRAPPED"].includes(unit.status),
-        ).length;
+        const groups = perPieceGroups.filter((group) => group.pieceId === piece.id);
+        const completedUnits = groups
+          .filter((group) =>
+            ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED", "SCRAPPED"].includes(
+              group.status,
+            ),
+          )
+          .reduce((sum, group) => sum + group._count._all, 0);
+        const resolved = groups
+          .filter((group) => ["ACCEPTED", "SCRAPPED"].includes(group.status))
+          .reduce((sum, group) => sum + group._count._all, 0);
         return {
           id: piece.id,
           reference: piece.reference,
@@ -503,19 +658,21 @@ export class OffersService {
         message: "Cette référence d’offre existe déjà.",
       });
     }
+    const client = await this.resolveClient(parsed.data);
     const created = await this.prisma.$transaction(async (transaction) => {
       const offer = await transaction.offer.create({
         data: {
           reference,
           revision: normalizeRevision(parsed.data.revision),
           name: parsed.data.name.trim(),
-          clientName: cleanNullable(parsed.data.clientName) ?? null,
+          clientId: client?.id ?? null,
+          clientName: client?.name ?? null,
           site: cleanNullable(parsed.data.site) ?? null,
           description: cleanNullable(parsed.data.description) ?? null,
           createdById: actor.user.id,
         },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "OFFER_CREATED",
           entityType: "OFFER",
@@ -525,6 +682,7 @@ export class OffersService {
           metadata: { reference: offer.reference, revision: offer.revision, name: offer.name },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: offer.id });
       return offer;
     });
     return this.get(created.id);
@@ -647,6 +805,11 @@ export class OffersService {
         target.status as OfferStatusValue,
         parsed.data.status,
       );
+    const clientInputProvided =
+      parsed.data.clientId !== undefined || parsed.data.clientName !== undefined;
+    const client = clientInputProvided
+      ? await this.resolveClient(parsed.data, target.clientId ?? undefined)
+      : undefined;
     await this.prisma.$transaction(async (transaction) => {
       if (parsed.data.status === "DRAFT" && target.status === "READY") {
         await transaction.cuttingPlan.updateMany({
@@ -659,8 +822,8 @@ export class OffersService {
         data: {
           ...(parsed.data.revision ? { revision: normalizeRevision(parsed.data.revision) } : {}),
           ...(parsed.data.name ? { name: parsed.data.name.trim() } : {}),
-          ...(parsed.data.clientName !== undefined
-            ? { clientName: cleanNullable(parsed.data.clientName) ?? null }
+          ...(clientInputProvided
+            ? { clientId: client?.id ?? null, clientName: client?.name ?? null }
             : {}),
           ...(parsed.data.site !== undefined
             ? { site: cleanNullable(parsed.data.site) ?? null }
@@ -672,7 +835,7 @@ export class OffersService {
           version: { increment: 1 },
         },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "OFFER_UPDATED",
           entityType: "OFFER",
@@ -686,6 +849,69 @@ export class OffersService {
           },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: id });
+    });
+    return this.get(id);
+  }
+
+  async overrideStatus(actor: AuthContext, id: string, input: unknown) {
+    if (actor.user.role !== "ADMIN") {
+      throw new ForbiddenException({
+        code: "FORBIDDEN",
+        message: "Seul un administrateur peut forcer le statut d’une affaire.",
+      });
+    }
+    const parsed = overrideOfferStatusSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "OFFER_STATUS_VALIDATION_ERROR",
+        message: "Sélectionnez un statut d’affaire valide.",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    await this.prisma.$transaction(async (transaction) => {
+      const target = await transaction.offer.findUnique({ where: { id } });
+      if (!target) {
+        throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Affaire introuvable." });
+      }
+      if (target.status === "ARCHIVED") {
+        throw new BadRequestException({
+          code: "OFFER_ARCHIVED",
+          message: "Restaurez l’affaire avant de modifier son statut.",
+        });
+      }
+      if (target.status === parsed.data.status) return;
+
+      const updated = await transaction.offer.updateMany({
+        where: { id, version: target.version, status: target.status },
+        data: { status: parsed.data.status, version: { increment: 1 } },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException({
+          code: "OFFER_CHANGED_CONCURRENTLY",
+          message: "L’affaire a été modifiée entre-temps. Actualisez la page puis réessayez.",
+        });
+      }
+      const event = await transaction.historyEvent.create({
+        data: {
+          eventType: "OFFER_STATUS_OVERRIDDEN",
+          entityType: "OFFER",
+          entityId: id,
+          actorUserId: actor.user.id,
+          actorRole: actor.user.role,
+          metadata: {
+            reference: target.reference,
+            previousStatus: target.status,
+            status: parsed.data.status,
+            override: true,
+            productionDataPreserved: true,
+            previousVersion: target.version,
+            version: target.version + 1,
+          },
+        },
+      });
+      await deliverBusinessNotification(transaction, event, { offerId: id });
     });
     return this.get(id);
   }
@@ -713,7 +939,7 @@ export class OffersService {
         where: { id },
         data: { status: "ARCHIVED", archivedAt: new Date(), version: { increment: 1 } },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "OFFER_ARCHIVED",
           entityType: "OFFER",
@@ -723,6 +949,7 @@ export class OffersService {
           metadata: { reference: target.reference },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: id });
     });
     return this.get(id);
   }
@@ -741,7 +968,7 @@ export class OffersService {
         where: { id },
         data: { status: "DRAFT", archivedAt: null, version: { increment: 1 } },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "OFFER_RESTORED",
           entityType: "OFFER",
@@ -751,6 +978,7 @@ export class OffersService {
           metadata: { reference: target.reference },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: id });
     });
     return this.get(id);
   }
@@ -763,12 +991,11 @@ export class OffersService {
         message: "Seule une offre brouillon vide peut être supprimée définitivement.",
       });
     }
-    const [pieces, imports, plans] = await Promise.all([
+    const [pieces, plans] = await Promise.all([
       this.prisma.piece.count({ where: { offerId: id } }),
-      this.prisma.importBatch.count({ where: { offerId: id } }),
       this.prisma.cuttingPlan.count({ where: { offerId: id } }),
     ]);
-    if (pieces + imports + plans > 0) {
+    if (pieces + plans > 0) {
       throw new BadRequestException({
         code: "OFFER_DELETE_NOT_EMPTY",
         message:
@@ -776,7 +1003,7 @@ export class OffersService {
       });
     }
     await this.prisma.$transaction(async (transaction) => {
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "OFFER_DELETED",
           entityType: "OFFER",
@@ -786,8 +1013,10 @@ export class OffersService {
           metadata: { reference: target.reference, name: target.name },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: id, href: "/offers" });
       await transaction.offer.delete({ where: { id } });
     });
     return { success: true };
   }
+
 }

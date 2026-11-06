@@ -72,6 +72,43 @@ function createService(prisma: Partial<PrismaService>): AssignmentsService {
 }
 
 describe("AssignmentsService", () => {
+  it("paginates and filters active assignment rows in the database", async () => {
+    const row = assignment("assignment-1");
+    const prisma = {
+      assignment: {
+        findMany: vi.fn().mockResolvedValue([row]),
+        count: vi.fn().mockResolvedValue(21),
+        groupBy: vi.fn().mockResolvedValue([{ machineId: "machine-1", _count: { _all: 3 } }]),
+      },
+      pieceUnit: { count: vi.fn().mockResolvedValue(4) },
+    };
+    const service = createService(prisma as never);
+    const result = await service.listAssignments(undefined, { page: 2, pageSize: 10, search: "CMD", machineId: "machine-1" });
+    expect(prisma.assignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ active: true, machineId: "machine-1", OR: expect.any(Array) }),
+      skip: 10,
+      take: 10,
+    }));
+    expect(result).toMatchObject({ pagination: { page: 2, pageSize: 10, total: 21, totalPages: 3 }, availableUnitCount: 4, activeMachineCount: 1 });
+  });
+
+  it("searches and paginates available units without loading the full assignment picker", async () => {
+    const prisma = {
+      pieceUnit: {
+        findMany: vi.fn().mockResolvedValue([unit]),
+        count: vi.fn().mockResolvedValue(11),
+      },
+    };
+    const service = createService(prisma as never);
+    const result = await service.listAvailableUnits(undefined, { page: 2, pageSize: 10, search: "CMD" });
+    expect(prisma.pieceUnit.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: "PENDING", piece: expect.objectContaining({ OR: expect.any(Array) }) }),
+      skip: 10,
+      take: 10,
+    }));
+    expect(result).toMatchObject({ pagination: { page: 2, pageSize: 10, total: 11, totalPages: 2 }, availableUnits: [{ id: "unit-1" }] });
+  });
+
   it("rejects invalid assignment input before persistence", async () => {
     const transaction = { pieceUnit: { findUnique: vi.fn() } };
     const prisma = { $transaction: vi.fn() };

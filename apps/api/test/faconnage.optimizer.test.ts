@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CuttingOptimizer } from "../src/faconnage/cutting-optimizer";
+import { RawStockLimitError } from "../src/faconnage/faconnage.types";
 
 const optimizer = new CuttingOptimizer();
 
@@ -75,5 +76,26 @@ describe("CuttingOptimizer", () => {
     expect(result.diagnostics.generatedPatternCount).toBeGreaterThan(0);
     expect(result.diagnostics.solveTimeMs).toBeGreaterThanOrEqual(0);
     expect(["HIGHS", "INTERNAL"]).toContain(result.diagnostics.solver);
+  });
+
+  it("never recommends more raw bars than the optional stock limits", async () => {
+    const result = await optimizer.optimize({
+      profile: "IPE200",
+      requirements: [{ lengthMm: 5000, quantity: 3 }],
+      rawLengths: [{ lengthMm: 6000, quantity: 1 }, { lengthMm: 12000, quantity: 1 }],
+    });
+
+    expect(result.totalBars).toBe(2);
+    expect(result.bars.filter((bar) => bar.rawLengthMm === 6000)).toHaveLength(1);
+    expect(result.bars.filter((bar) => bar.rawLengthMm === 12000)).toHaveLength(1);
+    expect(result.requirementSummary[0]).toMatchObject({ requestedQuantity: 3, producedQuantity: 3 });
+  });
+
+  it("rejects a request when the optional stock limits cannot meet demand", async () => {
+    await expect(optimizer.optimize({
+      profile: "HEA140",
+      requirements: [{ lengthMm: 3000, quantity: 3 }],
+      rawLengths: [{ lengthMm: 6000, quantity: 1 }],
+    })).rejects.toBeInstanceOf(RawStockLimitError);
   });
 });

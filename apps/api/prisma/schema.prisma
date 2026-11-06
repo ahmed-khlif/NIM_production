@@ -106,6 +106,7 @@ enum MachineSessionOperatorRole {
 enum ProductionRunStatus {
   RUNNING
   COMPLETED
+  CANCELLED
 }
 
 enum NonConformityReason {
@@ -136,15 +137,13 @@ model TabletAuthSession {
 }
 
 model LegacyOperatorArchive {
-  id                String   @id
-  firstName         String
-  lastName          String
-  connectionKeyId   String
-  connectionKeyHash String
-  active            Boolean
-  lastActivityAt    DateTime?
-  createdAt         DateTime
-  updatedAt         DateTime
+  id             String    @id
+  firstName      String
+  lastName       String
+  active         Boolean
+  lastActivityAt DateTime?
+  createdAt      DateTime
+  updatedAt      DateTime
 
   @@map("LegacyOperatorArchive")
   @@ignore
@@ -164,44 +163,43 @@ model LegacyOperatorAuthSessionArchive {
 }
 
 model User {
-  id                           String                 @id @default(cuid())
-  username                     String                 @unique
+  id                           String                   @id @default(cuid())
+  username                     String                   @unique
   displayName                  String
   passwordHash                 String
-  role                         UserRole               @default(OPERATOR)
-  isActive                     Boolean                @default(true)
-  tabletAccessEnabled          Boolean                @default(false)
-  connectionKeyId              String?                @unique
-  connectionKeyHash            String?
+  role                         UserRole                 @default(OPERATOR)
+  isActive                     Boolean                  @default(true)
+  tabletAccessEnabled          Boolean                  @default(false)
   disabledAt                   DateTime?
   lastLoginAt                  DateTime?
-  createdAt                    DateTime               @default(now())
-  updatedAt                    DateTime               @updatedAt
+  createdAt                    DateTime                 @default(now())
+  updatedAt                    DateTime                 @updatedAt
   sessions                     Session[]
   tabletAuthSessions           TabletAuthSession[]
-  historyEvents                HistoryEvent[]         @relation("HistoryActor")
-  createdPieces                Piece[]                @relation("PieceCreator")
-  currentPieceUnits            PieceUnit[]            @relation("CurrentPieceOperator")
-  createdAssignments           Assignment[]           @relation("AssignmentCreator")
-  createdMachineBarAssignments MachineBarAssignment[] @relation("MachineBarAssignmentCreator")
-  removedMachineBarAssignments MachineBarAssignment[] @relation("MachineBarAssignmentRemover")
-  productionOperations         ProductionOperation[]  @relation("ProductionOperator")
-  ledMachineSessions           MachineSession[]       @relation("MachineSessionLead")
+  historyEvents                HistoryEvent[]           @relation("HistoryActor")
+  notifications                Notification[]
+  createdPieces                Piece[]                  @relation("PieceCreator")
+  currentPieceUnits            PieceUnit[]              @relation("CurrentPieceOperator")
+  createdAssignments           Assignment[]             @relation("AssignmentCreator")
+  createdMachineBarAssignments MachineBarAssignment[]   @relation("MachineBarAssignmentCreator")
+  removedMachineBarAssignments MachineBarAssignment[]   @relation("MachineBarAssignmentRemover")
+  productionOperations         ProductionOperation[]    @relation("ProductionOperator")
+  ledMachineSessions           MachineSession[]         @relation("MachineSessionLead")
   machineSessionMemberships    MachineSessionOperator[]
-  startedProductionRuns        ProductionRun[]        @relation("ProductionRunStarter")
-  reportedNonConformities      NonConformity[]        @relation("NonConformityReporter")
-  currentProductionPieceUnits  PieceUnit[]            @relation("CurrentProductionOperator")
-  qualityControls              QualityControl[]       @relation("QualityController")
-  importBatches                ImportBatch[]          @relation("ImportCreator")
-  uploadedPieceImages          PieceImage[]           @relation("PieceImageUploader")
-  uploadedQualityImages        QualityControlImage[]  @relation("QualityControlImageUploader")
-  requestedDispositions        QualityDisposition[]   @relation("QualityDispositionRequester")
-  approvedDispositions         QualityDisposition[]   @relation("QualityDispositionApprover")
-  createdOffers                Offer[]                @relation("OfferCreator")
-  createdCuttingPlans          CuttingPlan[]          @relation("CuttingPlanCreator")
-  approvedCuttingPlans         CuttingPlan[]          @relation("CuttingPlanApprover")
+  startedProductionRuns        ProductionRun[]          @relation("ProductionRunStarter")
+  reportedNonConformities      NonConformity[]          @relation("NonConformityReporter")
+  currentProductionPieceUnits  PieceUnit[]              @relation("CurrentProductionOperator")
+  qualityControls              QualityControl[]         @relation("QualityController")
+  uploadedPieceImages          PieceImage[]             @relation("PieceImageUploader")
+  uploadedQualityImages        QualityControlImage[]    @relation("QualityControlImageUploader")
+  requestedDispositions        QualityDisposition[]     @relation("QualityDispositionRequester")
+  approvedDispositions         QualityDisposition[]     @relation("QualityDispositionApprover")
+  createdOffers                Offer[]                  @relation("OfferCreator")
+  createdCuttingPlans          CuttingPlan[]            @relation("CuttingPlanCreator")
+  approvedCuttingPlans         CuttingPlan[]            @relation("CuttingPlanApprover")
   settings                     UserSettings?
-  resolvedNonConformities      NonConformity[]        @relation("NonConformityResolver")
+  resolvedNonConformities      NonConformity[]          @relation("NonConformityResolver")
+  createdClients               Client[]                 @relation("ClientCreator")
 
   @@index([role, isActive])
 }
@@ -257,6 +255,7 @@ model Offer {
   revision         String          @default("A")
   name             String
   clientName       String?
+  clientId         String?
   site             String?
   description      String?
   status           OfferStatus     @default(DRAFT)
@@ -267,40 +266,61 @@ model Offer {
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
   createdBy        User            @relation("OfferCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  client           Client?         @relation(fields: [clientId], references: [id], onDelete: Restrict)
   pieces           Piece[]
-  importBatches    ImportBatch[]
   cuttingPlans     CuttingPlan[]
   bars             CuttingBar[]
   nonConformities  NonConformity[]
 
   @@index([status, updatedAt])
   @@index([clientName])
+  @@index([clientId, status])
   @@index([site])
   @@index([createdById, createdAt])
 }
 
+model Client {
+  id              String    @id @default(cuid())
+  name            String
+  nameKey         String    @unique
+  taxId           String?
+  taxIdKey        String?   @unique
+  phoneNumbers    String[]  @default([])
+  emails          String[]  @default([])
+  imageStorageKey String?   @unique
+  archivedAt      DateTime?
+  createdById     String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       User      @relation("ClientCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  offers          Offer[]
+
+  @@index([archivedAt, name])
+  @@index([createdById, createdAt])
+}
+
 model CuttingPlan {
-  id                String            @id @default(cuid())
+  id                String                @id @default(cuid())
   offerId           String
-  reference         String            @unique
-  status            CuttingPlanStatus @default(DRAFT)
+  reference         String                @unique
+  status            CuttingPlanStatus     @default(DRAFT)
   profileCount      Int
   totalBars         Int
   totalRawLengthMm  Int
   totalUsedLengthMm Int
   totalWasteMm      Int
-  utilizationRate   Decimal           @db.Decimal(6, 2)
+  utilizationRate   Decimal               @db.Decimal(6, 2)
   sourceRevision    Int
   input             Json
   result            Json
   createdById       String
   approvedById      String?
   approvedAt        DateTime?
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
-  offer             Offer             @relation(fields: [offerId], references: [id], onDelete: Restrict)
-  createdBy         User              @relation("CuttingPlanCreator", fields: [createdById], references: [id], onDelete: Restrict)
-  approvedBy        User?             @relation("CuttingPlanApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  offer             Offer                 @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  createdBy         User                  @relation("CuttingPlanCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy        User?                 @relation("CuttingPlanApprover", fields: [approvedById], references: [id], onDelete: SetNull)
   bars              CuttingBar[]
   proposals         CuttingPlanProposal[]
 
@@ -346,6 +366,20 @@ model Piece {
   @@index([createdById, createdAt])
 }
 
+model MaterialProfile {
+  id           String   @id @default(cuid())
+  profile      String   @unique
+  profileKey   String   @unique
+  kgPerMeter   Decimal  @db.Decimal(12, 6)
+  rawLengthsMm Int[]
+  aliases      String[] @default([])
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@index([isActive, profile])
+}
+
 model PieceImage {
   id           String   @id @default(cuid())
   pieceId      String
@@ -364,12 +398,12 @@ model PieceImage {
 }
 
 model PieceUnit {
-  id                          String                @id @default(cuid())
+  id                          String                    @id @default(cuid())
   pieceId                     String
   sequenceNumber              Int
-  status                      PieceUnitStatus       @default(PENDING)
-  productionStatus            PieceProductionStatus @default(PENDING)
-  qualityStatus               QualityStatus         @default(NOT_INSPECTED)
+  status                      PieceUnitStatus           @default(PENDING)
+  productionStatus            PieceProductionStatus     @default(PENDING)
+  qualityStatus               QualityStatus             @default(NOT_INSPECTED)
   currentMachineId            String?
   currentOperatorId           String?
   currentProductionOperatorId String?
@@ -377,11 +411,11 @@ model PieceUnit {
   manufacturedAt              DateTime?
   controlledAt                DateTime?
   qualityResult               String?
-  version                     Int                   @default(1)
-  piece                       Piece                 @relation(fields: [pieceId], references: [id], onDelete: Cascade)
-  currentMachine              Machine?              @relation("CurrentPieceMachine", fields: [currentMachineId], references: [id], onDelete: SetNull)
-  currentOperator             User?                 @relation("CurrentPieceOperator", fields: [currentOperatorId], references: [id], onDelete: SetNull)
-  currentProductionOperator   User?                  @relation("CurrentProductionOperator", fields: [currentProductionOperatorId], references: [id], onDelete: SetNull)
+  version                     Int                       @default(1)
+  piece                       Piece                     @relation(fields: [pieceId], references: [id], onDelete: Cascade)
+  currentMachine              Machine?                  @relation("CurrentPieceMachine", fields: [currentMachineId], references: [id], onDelete: SetNull)
+  currentOperator             User?                     @relation("CurrentPieceOperator", fields: [currentOperatorId], references: [id], onDelete: SetNull)
+  currentProductionOperator   User?                     @relation("CurrentProductionOperator", fields: [currentProductionOperatorId], references: [id], onDelete: SetNull)
   assignments                 Assignment[]
   barMemberships              CuttingBarItem[]
   productionOperations        ProductionOperation[]
@@ -449,22 +483,22 @@ model CuttingBar {
 }
 
 model CuttingPlanProposal {
-  id             String                     @id
-  cuttingPlanId  String
-  reference      String
-  ordinal        Int
-  profile        String
-  rawLengthMm    Int
-  usedLengthMm   Int
-  wasteMm        Int
-  cuts           Json
-  status         CuttingPlanProposalStatus  @default(PROPOSED)
-  validatedAt    DateTime?
-  cancelledAt    DateTime?
-  createdAt      DateTime                   @default(now())
-  cuttingPlan    CuttingPlan                @relation(fields: [cuttingPlanId], references: [id], onDelete: Restrict)
-  items          CuttingPlanProposalItem[]
-  cuttingBar     CuttingBar?
+  id            String                    @id
+  cuttingPlanId String
+  reference     String
+  ordinal       Int
+  profile       String
+  rawLengthMm   Int
+  usedLengthMm  Int
+  wasteMm       Int
+  cuts          Json
+  status        CuttingPlanProposalStatus @default(PROPOSED)
+  validatedAt   DateTime?
+  cancelledAt   DateTime?
+  createdAt     DateTime                  @default(now())
+  cuttingPlan   CuttingPlan               @relation(fields: [cuttingPlanId], references: [id], onDelete: Restrict)
+  items         CuttingPlanProposalItem[]
+  cuttingBar    CuttingBar?
 
   @@unique([cuttingPlanId, ordinal])
   @@unique([cuttingPlanId, reference])
@@ -472,11 +506,11 @@ model CuttingPlanProposal {
 }
 
 model CuttingPlanProposalItem {
-  id          String                @id
+  id          String              @id
   proposalId  String
   pieceUnitId String
-  proposal    CuttingPlanProposal   @relation(fields: [proposalId], references: [id], onDelete: Restrict)
-  pieceUnit   PieceUnit             @relation(fields: [pieceUnitId], references: [id], onDelete: Restrict)
+  proposal    CuttingPlanProposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+  pieceUnit   PieceUnit           @relation(fields: [pieceUnitId], references: [id], onDelete: Restrict)
 
   @@unique([proposalId, pieceUnitId])
   @@index([pieceUnitId])
@@ -559,6 +593,7 @@ model ProductionRun {
   status              ProductionRunStatus @default(RUNNING)
   startedAt           DateTime            @default(now())
   finishedAt          DateTime?
+  cancelledAt         DateTime?
   createdAt           DateTime            @default(now())
   cuttingBar          CuttingBar          @relation(fields: [cuttingBarId], references: [id], onDelete: Restrict)
   machine             Machine             @relation(fields: [machineId], references: [id], onDelete: Restrict)
@@ -722,43 +757,41 @@ model QualityDisposition {
   @@index([qualityControlId, requestedAt])
 }
 
-enum ImportBatchStatus {
-  PREVIEWED
-  COMMITTED
-  FAILED
-}
-
-model ImportBatch {
-  id           String            @id @default(cuid())
-  offerId      String
-  filename     String
-  status       ImportBatchStatus
-  rowsTotal    Int
-  rowsCreated  Int               @default(0)
-  rowsRejected Int               @default(0)
-  errors       Json?
-  createdById  String
-  createdAt    DateTime          @default(now())
-  completedAt  DateTime?
-  offer        Offer             @relation(fields: [offerId], references: [id], onDelete: Restrict)
-  createdBy    User              @relation("ImportCreator", fields: [createdById], references: [id], onDelete: Restrict)
-
-  @@index([offerId, createdAt])
-  @@index([createdById, createdAt])
-  @@index([status, createdAt])
-}
-
 model HistoryEvent {
-  id              String    @id @default(cuid())
-  eventType       String
-  entityType      String
-  entityId        String
-  actorUserId     String?
-  actorRole       UserRole?
-  metadata        Json?
-  createdAt       DateTime  @default(now())
-  actor           User?     @relation("HistoryActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  id            String         @id @default(cuid())
+  eventType     String
+  entityType    String
+  entityId      String
+  actorUserId   String?
+  actorRole     UserRole?
+  metadata      Json?
+  createdAt     DateTime       @default(now())
+  actor         User?          @relation("HistoryActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  notifications Notification[]
 
   @@index([entityType, entityId, createdAt])
   @@index([actorUserId, createdAt])
+}
+
+model Notification {
+  id              String        @id @default(cuid())
+  recipientUserId String
+  sourceEventId   String?
+  eventType       String
+  title           String
+  message         String
+  href            String
+  actorName       String?
+  offerId         String?
+  entityType      String?
+  entityId        String?
+  readAt          DateTime?
+  createdAt       DateTime      @default(now())
+  recipient       User          @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+  sourceEvent     HistoryEvent? @relation(fields: [sourceEventId], references: [id], onDelete: Restrict)
+
+  @@unique([sourceEventId, recipientUserId])
+  @@index([recipientUserId, readAt, createdAt])
+  @@index([recipientUserId, createdAt])
+  @@index([recipientUserId, offerId, createdAt])
 }

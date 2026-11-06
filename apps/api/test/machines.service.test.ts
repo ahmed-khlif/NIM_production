@@ -146,12 +146,12 @@ describe("MachinesService", () => {
     };
     const prisma = {
       machine: { findUnique: vi.fn().mockResolvedValue(machine) },
-      assignment: { findMany: vi.fn().mockResolvedValue([assignment]) },
+      assignment: { findMany: vi.fn().mockResolvedValue([assignment]), count: vi.fn().mockResolvedValue(1) },
       productionOperation: { count: vi.fn().mockResolvedValue(1) },
-      machineBarAssignment: { findMany: vi.fn().mockResolvedValue([]) },
+      machineBarAssignment: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
       machineSession: { findFirst: vi.fn().mockResolvedValue(null) },
       productionRun: { findFirst: vi.fn().mockResolvedValue(null) },
-      cuttingBar: { count: vi.fn().mockResolvedValue(0) },
+      cuttingBar: { count: vi.fn().mockResolvedValue(0), groupBy: vi.fn().mockResolvedValue([]) },
     };
     const service = createService(prisma as never);
 
@@ -214,9 +214,10 @@ describe("MachinesService", () => {
     });
     const prisma = {
       machine: { findUnique: vi.fn().mockResolvedValue(machine) },
-      assignment: { findMany: vi.fn().mockResolvedValue([]) },
+      assignment: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
       productionOperation: { count: vi.fn().mockResolvedValue(2) },
       machineBarAssignment: {
+        count: vi.fn().mockResolvedValue(2),
         findMany: vi
           .fn()
           .mockResolvedValue([
@@ -226,20 +227,38 @@ describe("MachinesService", () => {
       },
       machineSession: { findFirst: vi.fn().mockResolvedValue(null) },
       productionRun: { findFirst: vi.fn().mockResolvedValue(null) },
-      cuttingBar: { count: vi.fn().mockResolvedValueOnce(5).mockResolvedValueOnce(2) },
+      cuttingBar: {
+        count: vi.fn().mockResolvedValueOnce(5).mockResolvedValueOnce(2),
+        groupBy: vi.fn().mockResolvedValue([
+          { status: "AFFECTEE", _count: { _all: 1 } },
+          { status: "LANCEE", _count: { _all: 1 } },
+        ]),
+      },
     };
     const service = createService(prisma as never);
 
-    await expect(service.getMachine("machine-1")).resolves.toMatchObject({
+    await expect(service.getMachine("machine-1", { page: 2, pageSize: 10, search: "IPE200", status: "AFFECTEE" })).resolves.toMatchObject({
       assignedBarCount: 2,
+      cuttingBarsPagination: { page: 2, pageSize: 10, total: 2 },
       cuttingBars: [{ status: "AFFECTEE" }, { status: "LANCEE" }],
       barMetrics: { assigned: 1, inProgress: 1, fabricatedToday: 2, fabricatedTotal: 5 },
     });
     expect(prisma.machineBarAssignment.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        skip: 10,
+        take: 10,
+        orderBy: [
+          { cuttingBar: { profile: "asc" } },
+          { cuttingBar: { reference: "asc" } },
+          { assignedAt: "desc" },
+        ],
         include: { cuttingBar: { select: expect.objectContaining({ id: true, offer: { select: { reference: true } } }) } },
       }),
     );
+    expect(prisma.machineBarAssignment.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      machineId: "machine-1", active: true,
+      cuttingBar: { is: expect.objectContaining({ status: "AFFECTEE", OR: expect.any(Array) }) },
+    }) }));
     expect(prisma.cuttingBar.count).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({

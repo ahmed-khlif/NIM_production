@@ -5,7 +5,8 @@ import type {
   ProfileOptimizationInput,
   ProfileOptimizationResult,
 } from "./faconnage.types";
-import { HighsCuttingSolver, type SolverPattern } from "./highs-cutting-solver";
+import { RawStockLimitError } from "./faconnage.types";
+import { HighsCuttingSolver, type RawStockLimit, type SolverPattern } from "./highs-cutting-solver";
 
 interface NormalizedRequirement {
   lengthMm: number;
@@ -111,11 +112,18 @@ export class CuttingOptimizer {
   async optimize(input: ProfileOptimizationInput): Promise<ProfileOptimizationResult> {
     const startedAt = Date.now();
     const requirements = this.normalizeRequirements(input.requirements);
+    const stockLimits = new Map(
+      input.rawLengths
+        .filter((option): option is typeof option & { quantity: number } => option.quantity !== undefined)
+        .map((option) => [option.lengthMm, option.quantity]),
+    );
+    const rawStockLimits: RawStockLimit[] = [...stockLimits.entries()].map(([lengthMm, quantity]) => ({ lengthMm, quantity }));
+    const stockLimited = rawStockLimits.length > 0;
     const rawLengths = [...new Set(input.rawLengths.map((option) => option.lengthMm))].sort((a, b) => a - b);
-    const heuristic = this.bestFitDecreasing(requirements, rawLengths);
+    const heuristic = this.bestFitDecreasing(requirements, rawLengths, stockLimited ? stockLimits : undefined);
     const objectiveScale = requirements.reduce((sum, item) => sum + item.quantity, 0) + 1;
 
-    let recommended = heuristic;
+    let recommended: CuttingPlanAlternative | null = heuristic;
     let status: ProfileOptimizationResult["status"] = "HEURISTIC";
     let method: ProfileOptimizationResult["diagnostics"]["method"] = "BEST_FIT_DECREASING_FALLBACK";
     let generatedPatternCount = 0;
@@ -124,38 +132,39 @@ export class CuttingOptimizer {
     let exhaustivePatternSet = false;
     let solverAvailable = false;
 
-    const exhaustive = this.generateExhaustivePatterns(requirements, rawLengths);
+    const exhaustive = this.generateExhaustivePatterns(requirements, rawLengths, stockLimited);
     generatedPatternCount = exhaustive.patterns.length;
     exhaustivePatternSet = !exhaustive.truncated;
 
     solverAvailable = await this.highs.available();
 
-    if (solverAvailable && exhaustivePatternSet && exhaustive.patterns.length > 0) {
+    if (solverAvailable && exhaustive.patterns.length > 0 && (exhaustivePatternSet || stockLimited)) {
       const mip = await this.highs.solveIntegerMaster(
         requirements,
         exhaustive.patterns,
         exhaustive.patterns.map((pattern) => this.patternObjectiveCost(pattern, objectiveScale)),
         15,
+        rawStockLimits,
       );
       if (mip?.feasible) {
         const solverPlan = this.planFromPatternCounts(requirements, exhaustive.patterns, mip.counts);
-        if (this.comparePlans(solverPlan, recommended) <= 0) recommended = solverPlan;
-        status = mip.optimal ? "OPTIMAL" : "FEASIBLE";
+        if (!recommended || this.comparePlans(solverPlan, recommended) <= 0) recommended = solverPlan;
+        status = mip.optimal && exhaustivePatternSet ? "OPTIMAL" : "FEASIBLE";
         method = "HIGHS_MILP_EXHAUSTIVE";
       }
     }
 
-    if (solverAvailable && (!exhaustivePatternSet || status === "HEURISTIC")) {
+    if (solverAvailable && !stockLimited && (!exhaustivePatternSet || status === "HEURISTIC")) {
       const columnResult = await this.solveWithColumnGeneration(
         requirements,
         rawLengths,
-        heuristic,
+        heuristic ?? this.bestFitDecreasing(requirements, rawLengths)!,
         objectiveScale,
       );
       generatedPatternCount = Math.max(generatedPatternCount, columnResult.patternCount);
       columnGenerationIterations = columnResult.iterations;
       columnGenerationConverged = columnResult.converged;
-      if (columnResult.plan && this.comparePlans(columnResult.plan, recommended) <= 0) {
+      if (columnResult.plan && (!recommended || this.comparePlans(columnResult.plan, recommended) <= 0)) {
         recommended = columnResult.plan;
         status = columnResult.optimalProof ? "OPTIMAL" : "FEASIBLE";
         method = "COLUMN_GENERATION_MILP";
@@ -171,17 +180,22 @@ export class CuttingOptimizer {
         exhaustive.patterns.length > 0;
 
       if (fallbackExactEligible) {
-        const exact = this.solveIntegerPatternProblem(requirements, exhaustive.patterns);
+        const exact = this.solveIntegerPatternProblem(
+          requirements,
+          exhaustive.patterns,
+          stockLimited ? stockLimits : undefined,
+        );
         if (exact) {
           const exactPlan = this.planFromPatterns(requirements, exhaustive.patterns, exact.patternIds);
-          if (this.comparePlans(exactPlan, recommended) <= 0) recommended = exactPlan;
+          if (!recommended || this.comparePlans(exactPlan, recommended) <= 0) recommended = exactPlan;
           status = "OPTIMAL";
           method = "PATTERN_INTEGER_SEARCH_FALLBACK";
         }
       }
     }
 
-    const alternatives = this.buildAlternatives(requirements, rawLengths, recommended);
+    if (!recommended) throw new RawStockLimitError(input.profile);
+    const alternatives = stockLimited ? [] : this.buildAlternatives(requirements, rawLengths, recommended);
     const producedByLength = new Map<number, number>();
     for (const bar of recommended.bars) {
       for (const cut of bar.cuts) {
@@ -228,10 +242,12 @@ export class CuttingOptimizer {
   private bestFitDecreasing(
     requirements: NormalizedRequirement[],
     rawLengths: number[],
-  ): CuttingPlanAlternative {
+    stockLimits?: Map<number, number>,
+  ): CuttingPlanAlternative | null {
     type OpenBar = { rawLengthMm: number; remainingMm: number; cuts: number[] };
     const lengths = requirements.map((item) => item.lengthMm);
     const bars: OpenBar[] = [];
+    const usedByLength = new Map<number, number>();
 
     for (let typeIndex = 0; typeIndex < requirements.length; typeIndex += 1) {
       const requirement = requirements[typeIndex];
@@ -247,8 +263,12 @@ export class CuttingOptimizer {
         }
 
         if (bestBarIndex === -1) {
-          const rawLength = rawLengths.find((value) => value >= requirement.lengthMm);
-          if (rawLength === undefined) throw new Error("NO_RAW_LENGTH");
+          const rawLength = rawLengths.find(
+            (value) => value >= requirement.lengthMm &&
+              (!stockLimits?.has(value) || (usedByLength.get(value) ?? 0) < (stockLimits.get(value) ?? 0)),
+          );
+          if (rawLength === undefined) return null;
+          usedByLength.set(rawLength, (usedByLength.get(rawLength) ?? 0) + 1);
           const cuts = Array.from({ length: requirements.length }, () => 0);
           cuts[typeIndex] = 1;
           bars.push({ rawLengthMm: rawLength, remainingMm: rawLength - requirement.lengthMm, cuts });
@@ -282,6 +302,7 @@ export class CuttingOptimizer {
   private generateExhaustivePatterns(
     requirements: NormalizedRequirement[],
     rawLengths: number[],
+    preserveRawLength = false,
   ): GeneratedPatterns {
     const globalByCuts = new Map<string, Pattern>();
     let truncated = false;
@@ -306,7 +327,7 @@ export class CuttingOptimizer {
             cuts: [...cuts],
             usedLengthMm,
             wasteMm: rawLengthMm - usedLengthMm,
-          });
+          }, preserveRawLength);
           return;
         }
 
@@ -547,9 +568,15 @@ export class CuttingOptimizer {
     return { cuts, value: bestValue };
   }
 
-  private addDominantPattern(byCuts: Map<string, Pattern>, pattern: Pattern): void {
+  private addDominantPattern(
+    byCuts: Map<string, Pattern>,
+    pattern: Pattern,
+    preserveRawLength = false,
+  ): void {
     if (pattern.cuts.every((value) => value === 0)) return;
-    const signature = patternCutsSignature(pattern.cuts);
+    const signature = preserveRawLength
+      ? `${pattern.rawLengthMm}:${patternCutsSignature(pattern.cuts)}`
+      : patternCutsSignature(pattern.cuts);
     const current = byCuts.get(signature);
     // For identical cuts, the shortest raw bar strictly dominates longer bars.
     if (!current || pattern.rawLengthMm < current.rawLengthMm) byCuts.set(signature, pattern);
@@ -570,6 +597,7 @@ export class CuttingOptimizer {
   private solveIntegerPatternProblem(
     requirements: NormalizedRequirement[],
     patterns: Pattern[],
+    stockLimits?: Map<number, number>,
   ): SearchSolution | null {
     const initial = requirements.map((item) => item.quantity);
     const patternsByTarget = requirements.map((_, index) =>
@@ -587,11 +615,13 @@ export class CuttingOptimizer {
     let states = 0;
     let limitReached = false;
 
-    const solve = (remaining: number[]): SearchSolution | null => {
+    const limitedRawLengths = [...(stockLimits?.keys() ?? [])];
+    const stockIndex = new Map(limitedRawLengths.map((length, index) => [length, index]));
+    const solve = (remaining: number[], stockRemaining: number[]): SearchSolution | null => {
       if (remaining.every((value) => value === 0)) {
         return { patternIds: [], totalWasteMm: 0, totalRawLengthMm: 0, totalBars: 0 };
       }
-      const key = remaining.join(",");
+      const key = `${remaining.join(",")}|${stockRemaining.join(",")}`;
       if (memo.has(key)) return memo.get(key) ?? null;
       states += 1;
       if (states > MAX_FALLBACK_EXACT_STATES) {
@@ -602,6 +632,8 @@ export class CuttingOptimizer {
       const targetIndex = remaining.findIndex((value) => value > 0);
       let best: SearchSolution | null = null;
       for (const pattern of patternsByTarget[targetIndex]) {
+        const limitIndex = stockIndex.get(pattern.rawLengthMm);
+        if (limitIndex !== undefined && (stockRemaining[limitIndex] ?? 0) <= 0) continue;
         let applicable = true;
         for (let index = 0; index < remaining.length; index += 1) {
           if (pattern.cuts[index] > remaining[index]) {
@@ -612,7 +644,9 @@ export class CuttingOptimizer {
         if (!applicable) continue;
 
         const next = remaining.map((value, index) => value - pattern.cuts[index]);
-        const sub = solve(next);
+        const nextStock = [...stockRemaining];
+        if (limitIndex !== undefined) nextStock[limitIndex] -= 1;
+        const sub = solve(next, nextStock);
         if (!sub) continue;
         const candidate: SearchSolution = {
           patternIds: [pattern.id, ...sub.patternIds],
@@ -626,7 +660,7 @@ export class CuttingOptimizer {
       return best;
     };
 
-    const solution = solve(initial);
+    const solution = solve(initial, limitedRawLengths.map((length) => stockLimits?.get(length) ?? 0));
     return limitReached ? null : solution;
   }
 
@@ -686,10 +720,13 @@ export class CuttingOptimizer {
     rawLengths: number[],
     recommended: CuttingPlanAlternative,
   ): CuttingPlanAlternative[] {
-    const candidates: CuttingPlanAlternative[] = [this.bestFitDecreasing(requirements, rawLengths)];
+    const candidates: CuttingPlanAlternative[] = [];
+    const bestFit = this.bestFitDecreasing(requirements, rawLengths);
+    if (bestFit) candidates.push(bestFit);
     for (const rawLength of rawLengths) {
       if (requirements.every((requirement) => requirement.lengthMm <= rawLength)) {
-        candidates.push(this.bestFitDecreasing(requirements, [rawLength]));
+        const candidate = this.bestFitDecreasing(requirements, [rawLength]);
+        if (candidate) candidates.push(candidate);
       }
     }
     const recommendedSignature = planSignature(recommended);

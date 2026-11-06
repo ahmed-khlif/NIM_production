@@ -14,8 +14,35 @@ export class AssignmentsController {
   @Get()
   async list(
     @Query("offerId") offerId?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+    @Query("search") search?: string,
+    @Query("machineId") machineId?: string,
+    @Query("sortBy") sortBy?: string,
+    @Query("sortDirection") sortDirection?: string,
   ): Promise<Awaited<ReturnType<AssignmentsService["listAssignments"]>>> {
-    return this.assignmentsService.listAssignments(offerId);
+    return this.assignmentsService.listAssignments(offerId, {
+      page: page === undefined ? 1 : Number(page),
+      pageSize: pageSize === undefined ? 20 : Number(pageSize),
+      search,
+      machineId,
+      sortBy,
+      sortDirection,
+    });
+  }
+
+  @Get("available-units")
+  async availableUnits(
+    @Query("offerId") offerId?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+    @Query("search") search?: string,
+  ): Promise<Awaited<ReturnType<AssignmentsService["listAvailableUnits"]>>> {
+    return this.assignmentsService.listAvailableUnits(offerId, {
+      page: page === undefined ? 1 : Number(page),
+      pageSize: pageSize === undefined ? 20 : Number(pageSize),
+      search,
+    });
   }
 
   @Post()

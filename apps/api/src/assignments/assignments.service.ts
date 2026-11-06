@@ -23,6 +23,8 @@ import type {
 } from "@nim/types";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { parseListSort } from "../list-sorting";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { RealtimeService } from "../realtime/realtime.service";
 
 const assignmentInclude = {
@@ -82,11 +84,15 @@ export class AssignmentsService {
     };
   }
 
-  async listAssignments(offerId?: string): Promise<{
-    assignments: ManagedAssignment[];
-    availableUnits: AssignablePieceUnit[];
-  }> {
+  async listAssignments(offerId?: string, options: { page?: number; pageSize?: number; search?: string; machineId?: string; sortBy?: string; sortDirection?: string } = {}) {
     const normalizedOfferId = offerId?.trim() || undefined;
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    const search = options.search?.trim();
+    if (!Number.isInteger(page) || page < 1 || page > 1_000_000 || ![10, 20, 50].includes(pageSize)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination des affectations est invalide." });
+    }
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
     if (normalizedOfferId) {
       const offer = await this.prisma.offer.findUnique({
         where: { id: normalizedOfferId },
@@ -96,17 +102,40 @@ export class AssignmentsService {
         throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
       }
     }
-    const [assignments, availableUnits] = await Promise.all([
+    const where: Prisma.AssignmentWhereInput = {
+      active: true,
+      ...(options.machineId ? { machineId: options.machineId } : {}),
+      ...(normalizedOfferId ? { pieceUnit: { piece: { offerId: normalizedOfferId } } } : {}),
+      ...(search ? { OR: [
+        { pieceUnit: { piece: { reference: { contains: search, mode: "insensitive" } } } },
+        { pieceUnit: { piece: { profile: { contains: search, mode: "insensitive" } } } },
+        { machine: { name: { contains: search, mode: "insensitive" } } },
+        { machine: { internalNumber: { contains: search, mode: "insensitive" } } },
+      ] } : {}),
+    };
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "profile", "machine", "priority", "status", "assignedAt"] as const, { sortBy: "assignedAt", sortDirection: "desc" });
+    const sortValue = sort.sortDirection;
+    const orderBy: Prisma.AssignmentOrderByWithRelationInput[] = sort.sortBy === "reference"
+      ? [{ pieceUnit: { piece: { reference: sortValue } } }, { id: "asc" }]
+      : sort.sortBy === "profile"
+        ? [{ pieceUnit: { piece: { profile: sortValue } } }, { id: "asc" }]
+        : sort.sortBy === "machine"
+          ? [{ machine: { name: sortValue } }, { id: "asc" }]
+          : sort.sortBy === "priority"
+            ? [{ pieceUnit: { piece: { priority: sortValue } } }, { id: "asc" }]
+            : sort.sortBy === "status"
+              ? [{ pieceUnit: { status: sortValue } }, { id: "asc" }]
+              : [{ assignedAt: sortValue }, { id: "asc" }];
+    const [assignments, total, availableUnitCount, machineGroups] = await Promise.all([
       this.prisma.assignment.findMany({
-        where: {
-          active: true,
-          ...(normalizedOfferId ? { pieceUnit: { piece: { offerId: normalizedOfferId } } } : {}),
-        },
+        where,
         include: assignmentInclude,
-        orderBy: [{ machineId: "asc" }, { queuePosition: "asc" }, { assignedAt: "asc" }],
+        orderBy,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
       }),
-      this.prisma.pieceUnit.findMany({
-        where: {
+      this.prisma.assignment.count({ where }),
+      this.prisma.pieceUnit.count({ where: {
           status: "PENDING",
           assignments: { none: { active: true } },
           piece: {
@@ -114,15 +143,47 @@ export class AssignmentsService {
             offer: { status: { in: ["READY", "IN_PRODUCTION"] } },
             ...(normalizedOfferId ? { offerId: normalizedOfferId } : {}),
           },
-        },
-        include: { piece: { select: { reference: true, profile: true, priority: true } } },
-        orderBy: [{ pieceId: "asc" }, { sequenceNumber: "asc" }],
-      }),
+        } }),
+      this.prisma.assignment.groupBy({ by: ["machineId"], where: { active: true, ...(normalizedOfferId ? { pieceUnit: { piece: { offerId: normalizedOfferId } } } : {}) }, _count: { _all: true } }),
     ]);
     return {
       assignments: assignments.map((assignment) => this.toManagedAssignment(assignment)),
-      availableUnits: availableUnits.map((unit) => this.toAssignableUnit(unit)),
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+      availableUnitCount,
+      activeMachineCount: machineGroups.length,
     };
+  }
+
+  async listAvailableUnits(offerId?: string, options: { page?: number; pageSize?: number; search?: string } = {}) {
+    const normalizedOfferId = offerId?.trim() || undefined;
+    const page = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    const search = options.search?.trim();
+    if (!Number.isInteger(page) || page < 1 || page > 1_000_000 || ![10, 20, 50].includes(pageSize)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination des unités disponibles est invalide." });
+    }
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
+    if (normalizedOfferId && !(await this.prisma.offer.findUnique({ where: { id: normalizedOfferId }, select: { id: true } }))) {
+      throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
+    }
+    const where: Prisma.PieceUnitWhereInput = {
+      status: "PENDING",
+      assignments: { none: { active: true } },
+      piece: {
+        status: { notIn: ["ARCHIVED", "COMPLETED"] },
+        offer: { status: { in: ["READY", "IN_PRODUCTION"] } },
+        ...(normalizedOfferId ? { offerId: normalizedOfferId } : {}),
+        ...(search ? { OR: [
+          { reference: { contains: search, mode: "insensitive" } },
+          { profile: { contains: search, mode: "insensitive" } },
+        ] } : {}),
+      },
+    };
+    const [units, total] = await Promise.all([
+      this.prisma.pieceUnit.findMany({ where, include: { piece: { select: { reference: true, profile: true, priority: true } } }, orderBy: [{ pieceId: "asc" }, { sequenceNumber: "asc" }], skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.pieceUnit.count({ where }),
+    ]);
+    return { availableUnits: units.map((unit) => this.toAssignableUnit(unit)), pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } };
   }
 
   async assign(actor: AuthContext, input: unknown): Promise<ManagedAssignment> {
@@ -225,7 +286,7 @@ export class AssignmentsService {
             where: { id: unit.pieceId },
             data: { status: "ASSIGNED", version: { increment: 1 } },
           });
-        await transaction.historyEvent.create({
+        const event = await transaction.historyEvent.create({
           data: {
             eventType: "ASSIGNMENT_CREATED",
             entityType: "ASSIGNMENT",
@@ -236,11 +297,13 @@ export class AssignmentsService {
               offerId: unit.piece.offerId,
               pieceUnitId: unit.id,
               pieceId: unit.pieceId,
+              reference: unit.piece.reference,
               machineId: machine.id,
               queuePosition: assignment.queuePosition,
             },
           },
         });
+        await deliverBusinessNotification(transaction, event, { offerId: unit.piece.offerId, machineId: machine.id });
         return this.toManagedAssignment({
           ...assignment,
           pieceUnit: {
@@ -360,7 +423,7 @@ export class AssignmentsService {
         where: { id: existing.pieceUnitId },
         data: { currentMachineId: machine.id, version: { increment: 1 } },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "ASSIGNMENT_REASSIGNED",
           entityType: "ASSIGNMENT",
@@ -371,12 +434,15 @@ export class AssignmentsService {
             offerId: existing.pieceUnit.piece.offerId,
             previousAssignmentId: id,
             pieceUnitId: existing.pieceUnitId,
+            pieceId: existing.pieceUnit.pieceId,
+            reference: existing.pieceUnit.piece.reference,
             oldMachineId: existing.machineId,
             newMachineId: machine.id,
             reason: parsed.data.reason,
           },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: existing.pieceUnit.piece.offerId, machineId: machine.id });
       return this.toManagedAssignment(replacement);
     });
     this.realtime?.publish({
@@ -452,7 +518,7 @@ export class AssignmentsService {
           where: { id: existing.pieceUnit.pieceId },
           data: { status: "PLANNED", version: { increment: 1 } },
         });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "ASSIGNMENT_UNASSIGNED",
           entityType: "ASSIGNMENT",
@@ -462,11 +528,14 @@ export class AssignmentsService {
           metadata: {
             offerId: existing.pieceUnit.piece.offerId,
             pieceUnitId: existing.pieceUnitId,
+            pieceId: existing.pieceUnit.pieceId,
+            reference: existing.pieceUnit.piece.reference,
             machineId: existing.machineId,
             reason: parsed.data.reason,
           },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId: existing.pieceUnit.piece.offerId, machineId: existing.machineId });
       return this.toManagedAssignment({
         ...closed,
         pieceUnit: {

@@ -51,6 +51,9 @@ export class HistoryService {
           { eventType: { contains: parsed.search, mode: "insensitive" } },
           { entityType: { contains: parsed.search, mode: "insensitive" } },
           { entityId: { contains: parsed.search, mode: "insensitive" } },
+          { metadata: { path: ["reference"], string_contains: parsed.search, mode: "insensitive" } },
+          { metadata: { path: ["offerReference"], string_contains: parsed.search, mode: "insensitive" } },
+          { metadata: { path: ["internalNumber"], string_contains: parsed.search, mode: "insensitive" } },
         ],
       });
     }
@@ -76,6 +79,11 @@ export class HistoryService {
     }
     const where = this.buildWhere(parsed.data, scope);
     const skip = (parsed.data.page - 1) * parsed.data.pageSize;
+    const sortBy = parsed.data.sortBy ?? "createdAt";
+    const sortDirection = parsed.data.sortDirection ?? "desc";
+    const orderBy: Prisma.HistoryEventOrderByWithRelationInput[] = sortBy === "actorName"
+      ? [{ actor: { displayName: sortDirection } }, { id: "desc" }]
+      : [{ [sortBy]: sortDirection }, { id: "desc" }];
     const [total, events] = await Promise.all([
       this.prisma.historyEvent.count({ where }),
       this.prisma.historyEvent.findMany({
@@ -83,7 +91,7 @@ export class HistoryService {
         include: {
           actor: { select: { displayName: true } },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy,
         skip,
         take: parsed.data.pageSize,
       }),

@@ -9,12 +9,21 @@ export interface CuttingRequirementInput {
 
 export interface RawLengthOptionInput {
   lengthMm: number;
+  /** Optional maximum available bars for this optimization; not inventory reservation. */
+  quantity?: number;
 }
 
 export interface ProfileOptimizationInput {
   profile: string;
   requirements: CuttingRequirementInput[];
   rawLengths: RawLengthOptionInput[];
+}
+
+export class RawStockLimitError extends Error {
+  constructor(readonly profile: string) {
+    super(`No feasible cutting plan with the available raw bars for ${profile}.`);
+    this.name = "RawStockLimitError";
+  }
 }
 
 export interface CuttingBarPlan {

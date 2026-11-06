@@ -16,13 +16,14 @@ import type { OperatorAuthContext, OperatorIdentity } from "./operator-auth.type
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 8;
 const RATE_LIMIT_WINDOW_MS = 1000 * 60 * 15;
 const MAX_LOGIN_ATTEMPTS = 8;
+const PRESENCE_REFRESH_INTERVAL_MS = 15_000;
 
 type LoginAttempt = { count: number; startedAt: number };
 
 @Injectable()
 export class OperatorAuthService {
   private readonly loginAttempts = new Map<string, LoginAttempt>();
-  private readonly dummyKeyHash = argon2.hash(randomBytes(32).toString("hex"), {
+  private readonly dummyPasswordHash = argon2.hash(randomBytes(32).toString("hex"), {
     type: argon2.argon2id,
   });
 
@@ -77,6 +78,20 @@ export class OperatorAuthService {
     ) {
       return null;
     }
+    const now = new Date();
+    if (
+      !session.lastUsedAt ||
+      now.getTime() - session.lastUsedAt.getTime() >= PRESENCE_REFRESH_INTERVAL_MS
+    ) {
+      await this.prisma.tabletAuthSession.updateMany({
+        where: {
+          id: session.id,
+          revokedAt: null,
+          lastUsedAt: session.lastUsedAt,
+        },
+        data: { lastUsedAt: now },
+      });
+    }
     return {
       operator: {
         id: session.user.id,
@@ -92,24 +107,21 @@ export class OperatorAuthService {
     metadata: { ipAddress?: string; userAgent?: string },
   ): Promise<{ token: string; expiresAt: Date; operator: OperatorIdentity }> {
     const parsed = operatorLoginSchema.safeParse(input);
-    const suppliedKey = parsed.success ? parsed.data.connectionKey : "";
-    const keyId = suppliedKey.match(/^NIM-([0-9A-F]{12})-/i)?.[1]?.toUpperCase();
-    const rateKey = metadata.ipAddress ?? "unknown";
+    const username = parsed.success ? parsed.data.username.toLowerCase() : "invalid";
+    const rateKey = `${metadata.ipAddress ?? "unknown"}:${username}`;
     this.assertLoginAllowed(rateKey);
 
-    const user = keyId
-      ? await this.prisma.user.findUnique({ where: { connectionKeyId: keyId } })
-      : null;
-    const hash = user?.connectionKeyHash ?? (await this.dummyKeyHash);
-    const keyMatches = await argon2
-      .verify(hash, suppliedKey || "invalid-connection-key")
+    const user = parsed.success ? await this.prisma.user.findUnique({ where: { username } }) : null;
+    const hash = user?.passwordHash ?? (await this.dummyPasswordHash);
+    const passwordMatches = await argon2
+      .verify(hash, parsed.success ? parsed.data.password : "invalid-operator-password")
       .catch(() => false);
     if (
       !parsed.success ||
       !user?.isActive ||
       user.role !== "OPERATOR" ||
       !user.tabletAccessEnabled ||
-      !keyMatches
+      !passwordMatches
     ) {
       this.registerLoginFailure(rateKey);
       await this.prisma.historyEvent.create({
@@ -121,8 +133,8 @@ export class OperatorAuthService {
         },
       });
       throw new UnauthorizedException({
-        code: "INVALID_OPERATOR_KEY",
-        message: "Clé de connexion invalide.",
+        code: "INVALID_OPERATOR_CREDENTIALS",
+        message: "Identifiant ou mot de passe opérateur incorrect.",
       });
     }
 

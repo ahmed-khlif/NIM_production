@@ -20,14 +20,19 @@ export class UsersController {
     @Query("search") search?: string,
     @Query("role") role?: string,
     @Query("active") active?: string,
+    @Query("sortBy") sortBy?: string,
+    @Query("sortDirection") sortDirection?: string,
   ) {
-    if ([page, pageSize, search, role, active].every((value) => value === undefined)) {
+    if ([page, pageSize, search, role, active, sortBy, sortDirection].every((value) => value === undefined)) {
       const users = await this.authService.listUsers(actor.user.role === "PRODUCTION_MANAGER" ? "OPERATOR" : undefined);
       return { users };
     }
     const roles: UserRole[] = ["ADMIN", "PRODUCTION_MANAGER", "OPERATOR", "QUALITY_CONTROLLER"];
     if (role && !roles.includes(role as UserRole)) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Le filtre de rôle est invalide." });
+    }
+    if (active !== undefined && active !== "true" && active !== "false") {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Le filtre d’activité est invalide." });
     }
     const allowedRole = actor.user.role === "PRODUCTION_MANAGER" ? "OPERATOR" : role as UserRole | undefined;
     return this.authService.listUsersPage({
@@ -36,6 +41,8 @@ export class UsersController {
       search,
       role: allowedRole,
       active: active === undefined ? undefined : active === "true",
+      sortBy,
+      sortDirection,
     });
   }
 

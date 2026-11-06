@@ -13,6 +13,11 @@ const actor = {
   sessionId: "session-1",
   tokenHash: "hash",
 };
+const adminActor = {
+  user: { id: "admin-1", username: "admin", displayName: "Admin", role: "ADMIN" as const },
+  sessionId: "admin-session",
+  tokenHash: "admin-hash",
+};
 const dates = { createdAt: new Date("2026-01-01"), updatedAt: new Date("2026-01-01") };
 const piece = {
   id: "piece-1",
@@ -91,6 +96,118 @@ function createService(prisma: Partial<PrismaService>): ProductionService {
 }
 
 describe("ProductionService", () => {
+  it("lets an admin end an idle machine session, preserving history and notifying the team", async () => {
+    const event = {
+      id: "event-1",
+      eventType: "MACHINE_SESSION_ENDED",
+      entityType: "MACHINE_SESSION",
+      entityId: "machine-session-1",
+      actorUserId: adminActor.user.id,
+      actorRole: "ADMIN",
+      metadata: {},
+    };
+    const transaction = {
+      machineSessionOperator: {
+        findFirst: vi.fn().mockResolvedValue({
+          machineSession: {
+            id: "machine-session-1",
+            machineId: machine.id,
+            machine: { id: machine.id, name: machine.name },
+            members: [{ operatorId: "operator-1" }, { operatorId: "operator-2" }],
+          },
+        }),
+        updateMany: vi.fn().mockResolvedValue({ count: 2 }),
+      },
+      productionRun: { findFirst: vi.fn().mockResolvedValue(null) },
+      machineSession: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      historyEvent: { create: vi.fn().mockResolvedValue(event) },
+      user: {
+        findMany: vi.fn().mockResolvedValue([]),
+        findUnique: vi.fn().mockResolvedValue({ displayName: "Admin" }),
+      },
+      machine: { findUnique: vi.fn().mockResolvedValue({ id: machine.id, name: machine.name, internalNumber: machine.internalNumber }) },
+      offer: { findUnique: vi.fn() },
+      pieceUnit: { findUnique: vi.fn() },
+      cuttingBar: { findUnique: vi.fn() },
+      notification: { createMany: vi.fn() },
+    };
+    const realtime = { publish: vi.fn() };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    };
+    const service = new ProductionService(prisma as never, realtime as never);
+
+    await expect(service.endMachineSessionByAdmin(adminActor, "operator-1")).resolves.toEqual({
+      success: true,
+    });
+    expect(transaction.machineSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "machine-session-1", status: "ACTIVE" },
+      data: expect.objectContaining({ status: "ENDED" }),
+    }));
+    expect(transaction.machineSessionOperator.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { machineSessionId: "machine-session-1", active: true },
+      data: expect.objectContaining({ active: false }),
+    }));
+    expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        eventType: "MACHINE_SESSION_ENDED",
+        actorUserId: adminActor.user.id,
+        metadata: expect.objectContaining({ endedByAdmin: true }),
+      }),
+    }));
+    expect(transaction.notification.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.arrayContaining([
+        expect.objectContaining({ recipientUserId: "operator-1" }),
+        expect.objectContaining({ recipientUserId: "operator-2" }),
+      ]),
+    }));
+    expect(realtime.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: "machine-session.ended",
+      entityId: "machine-session-1",
+    }));
+  });
+
+  it("does not let an admin end a machine session while a bar is running", async () => {
+    const transaction = {
+      machineSessionOperator: {
+        findFirst: vi.fn().mockResolvedValue({
+          machineSession: {
+            id: "machine-session-1",
+            machineId: machine.id,
+            machine: { id: machine.id, name: machine.name },
+            members: [{ operatorId: "operator-1" }],
+          },
+        }),
+        updateMany: vi.fn(),
+      },
+      productionRun: {
+        findFirst: vi.fn().mockResolvedValue({ cuttingBar: { reference: "OFF-B001" } }),
+      },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    };
+    const service = createService(prisma as never);
+
+    await expect(service.endMachineSessionByAdmin(adminActor, "operator-1")).rejects.toMatchObject({
+      response: expect.objectContaining({ code: "SESSION_HAS_RUNNING_PRODUCTION" }),
+    });
+    expect(transaction.machineSessionOperator.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-admin attempts to end another operator's machine session", async () => {
+    const prisma = { $transaction: vi.fn() };
+    const service = createService(prisma as never);
+
+    await expect(service.endMachineSessionByAdmin(actor, "operator-2")).rejects.toMatchObject({
+      response: expect.objectContaining({ code: "ADMIN_REQUIRED" }),
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid start input before persistence", async () => {
     const prisma = { $transaction: vi.fn() };
     const service = createService(prisma as never);

@@ -11,5 +11,6 @@ import { PiecesService } from "./pieces.service";
   imports: [AuthModule, PrismaModule, RealtimeModule],
   controllers: [PiecesController, OfferPiecesController],
   providers: [PiecesService, PieceImageStorage],
+  exports: [PieceImageStorage],
 })
 export class PiecesModule {}

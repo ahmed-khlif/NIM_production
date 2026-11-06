@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { Prisma, User } from "@prisma/client";
 import { changePasswordSchema, createUserSchema, loginSchema, resetUserPasswordSchema, updateUserSchema } from "@nim/validation";
@@ -6,6 +6,8 @@ import type { AuthenticatedUser, ManagedUser, UserRole } from "@nim/types";
 import argon2 from "argon2";
 import { createHash, randomBytes } from "node:crypto";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { parseListSort } from "../list-sorting";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { SESSION_COOKIE_NAME, type AuthContext } from "./auth.types";
 
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 8;
@@ -25,8 +27,8 @@ export class AuthService {
     return { id: user.id, username: user.username, displayName: user.displayName, role: user.role as UserRole };
   }
 
-  toManagedUser(user: Pick<User, "id" | "username" | "displayName" | "role" | "isActive" | "tabletAccessEnabled" | "connectionKeyHash" | "createdAt" | "lastLoginAt">): ManagedUser {
-    return { ...this.toPublicUser(user), isActive: user.isActive, tabletAccessEnabled: user.tabletAccessEnabled, hasConnectionKey: Boolean(user.connectionKeyHash), createdAt: user.createdAt.toISOString(), lastLoginAt: user.lastLoginAt?.toISOString() ?? null };
+  toManagedUser(user: Pick<User, "id" | "username" | "displayName" | "role" | "isActive" | "tabletAccessEnabled" | "createdAt" | "lastLoginAt">): ManagedUser {
+    return { ...this.toPublicUser(user), isActive: user.isActive, tabletAccessEnabled: user.tabletAccessEnabled, createdAt: user.createdAt.toISOString(), lastLoginAt: user.lastLoginAt?.toISOString() ?? null };
   }
 
   readSessionCookie(header: string | undefined): string | null {
@@ -101,6 +103,7 @@ export class AuthService {
   }
 
   async changePassword(auth: AuthContext, input: unknown): Promise<void> {
+    if (auth.user.role === "OPERATOR") throw new ForbiddenException({ code: "OPERATOR_PASSWORD_MANAGED", message: "Le mot de passe opérateur est géré par un administrateur." });
     const parsed = changePasswordSchema.safeParse(input);
     if (!parsed.success) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Vérifiez les informations saisies.", details: parsed.error.flatten() });
     const user = await this.prisma.user.findUnique({ where: { id: auth.user.id } });
@@ -114,17 +117,18 @@ export class AuthService {
   }
 
   async listUsers(role?: UserRole): Promise<ManagedUser[]> {
-    const users = await this.prisma.user.findMany({ where: role ? { role } : undefined, orderBy: [{ isActive: "desc" }, { displayName: "asc" }], select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, connectionKeyHash: true, createdAt: true, lastLoginAt: true } });
+    const users = await this.prisma.user.findMany({ where: role ? { role } : undefined, orderBy: [{ isActive: "desc" }, { displayName: "asc" }], select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, createdAt: true, lastLoginAt: true } });
     return users.map((user) => this.toManagedUser(user));
   }
 
-  async listUsersPage(options: { role?: UserRole; page?: number; pageSize?: number; search?: string; active?: boolean } = {}) {
+  async listUsersPage(options: { role?: UserRole; page?: number; pageSize?: number; search?: string; active?: boolean; sortBy?: string; sortDirection?: string } = {}) {
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
-    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || ![10, 20, 50].includes(pageSize)) {
+    if (!Number.isInteger(page) || page < 1 || page > 1_000_000 || !Number.isInteger(pageSize) || ![10, 20, 50].includes(pageSize)) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination des utilisateurs est invalide." });
     }
     const search = options.search?.trim();
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
     const where: Prisma.UserWhereInput = {
       ...(options.role ? { role: options.role } : {}),
       ...(options.active === undefined ? {} : { isActive: options.active }),
@@ -133,21 +137,64 @@ export class AuthService {
         { username: { contains: search, mode: "insensitive" } },
       ] } : {}),
     };
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["displayName", "username", "role", "isActive", "lastLoginAt"] as const, { sortBy: "displayName", sortDirection: "asc" });
+    const orderBy: Prisma.UserOrderByWithRelationInput[] = [{ [sort.sortBy]: sort.sortDirection }, { id: "asc" }];
     const [users, total, activeCount, adminCount, tabletAccessCount] = await Promise.all([
       this.prisma.user.findMany({
         where,
-        orderBy: [{ isActive: "desc" }, { displayName: "asc" }, { id: "asc" }],
+        orderBy,
         skip: (page - 1) * pageSize,
         take: pageSize,
-        select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, connectionKeyHash: true, createdAt: true, lastLoginAt: true },
+        select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, createdAt: true, lastLoginAt: true },
       }),
       this.prisma.user.count({ where }),
       this.prisma.user.count({ where: { ...(options.role ? { role: options.role } : {}), isActive: true } }),
       this.prisma.user.count({ where: { role: "ADMIN", isActive: true } }),
       this.prisma.user.count({ where: { role: "OPERATOR", tabletAccessEnabled: true, ...(options.role ? { role: options.role } : {}) } }),
     ]);
+    const operatorIds = users.filter((user) => user.role === "OPERATOR").map((user) => user.id);
+    const memberships = operatorIds.length
+      ? await this.prisma.machineSessionOperator.findMany({
+          where: {
+            operatorId: { in: operatorIds },
+            active: true,
+            machineSession: { status: "ACTIVE" },
+          },
+          select: {
+            operatorId: true,
+            machineSession: {
+              select: {
+                id: true,
+                startedAt: true,
+                machine: { select: { name: true } },
+                productionRuns: {
+                  where: { status: "RUNNING" },
+                  take: 1,
+                  select: { cuttingBar: { select: { reference: true } } },
+                },
+              },
+            },
+          },
+        })
+      : [];
+    const sessionByOperatorId = new Map(
+      memberships.map((membership) => [membership.operatorId, membership.machineSession]),
+    );
     return {
-      users: users.map((user) => this.toManagedUser(user)),
+      users: users.map((user) => {
+        const session = sessionByOperatorId.get(user.id);
+        return {
+          ...this.toManagedUser(user),
+          activeMachineSession: session
+            ? {
+                id: session.id,
+                machineName: session.machine.name,
+                startedAt: session.startedAt.toISOString(),
+                runningBarReference: session.productionRuns[0]?.cuttingBar.reference ?? null,
+              }
+            : null,
+        };
+      }),
       pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
       summary: { activeCount, adminCount, tabletAccessCount },
     };
@@ -160,8 +207,9 @@ export class AuthService {
     if (await this.prisma.user.findUnique({ where: { username }, select: { id: true } })) throw new ConflictException({ code: "USERNAME_TAKEN", message: "Cet identifiant est déjà utilisé." });
     const passwordHash = await argon2.hash(parsed.data.password, { type: argon2.argon2id });
     return this.prisma.$transaction(async (transaction) => {
-      const user = await transaction.user.create({ data: { username, displayName: parsed.data.displayName, role: parsed.data.role, passwordHash }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, connectionKeyHash: true, createdAt: true, lastLoginAt: true } });
-      await transaction.historyEvent.create({ data: { eventType: "USER_CREATED", entityType: "USER", entityId: user.id, actorUserId: actor.user.id, actorRole: actor.user.role, metadata: { role: user.role } } });
+      const user = await transaction.user.create({ data: { username, displayName: parsed.data.displayName, role: parsed.data.role, passwordHash, ...(parsed.data.role === "OPERATOR" ? { tabletAccessEnabled: true } : {}) }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, createdAt: true, lastLoginAt: true } });
+      const event = await transaction.historyEvent.create({ data: { eventType: "USER_CREATED", entityType: "USER", entityId: user.id, actorUserId: actor.user.id, actorRole: actor.user.role, metadata: { role: user.role, displayName: user.displayName } } });
+      await deliverBusinessNotification(transaction, event, { targetUserIds: [user.id] });
       return this.toManagedUser(user);
     });
   }
@@ -176,9 +224,10 @@ export class AuthService {
     if (target.id === actor.user.id && parsed.data.role !== "ADMIN") throw new ConflictException({ code: "CANNOT_REMOVE_OWN_ADMIN", message: "Vous ne pouvez pas retirer votre propre accès administrateur." });
     return this.prisma.$transaction(async (transaction) => {
       if (target.isActive && target.role === "ADMIN" && parsed.data.role !== "ADMIN" && await transaction.user.count({ where: { role: "ADMIN", isActive: true } }) <= 1) throw new ConflictException({ code: "LAST_ADMIN", message: "Le dernier administrateur actif doit être conservé." });
-      const user = await transaction.user.update({ where: { id }, data: { displayName: parsed.data.displayName, role: parsed.data.role, ...(removingOperatorRole ? { tabletAccessEnabled: false } : {}) }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, connectionKeyHash: true, createdAt: true, lastLoginAt: true } });
+      const user = await transaction.user.update({ where: { id }, data: { displayName: parsed.data.displayName, role: parsed.data.role, ...(target.role !== "OPERATOR" && parsed.data.role === "OPERATOR" ? { tabletAccessEnabled: true } : {}), ...(removingOperatorRole ? { tabletAccessEnabled: false } : {}) }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, createdAt: true, lastLoginAt: true } });
       if (removingOperatorRole) await transaction.tabletAuthSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
-      await transaction.historyEvent.create({ data: { eventType: "USER_UPDATED", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role, metadata: { role: user.role } } });
+      const event = await transaction.historyEvent.create({ data: { eventType: "USER_UPDATED", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role, metadata: { role: user.role, displayName: user.displayName } } });
+      await deliverBusinessNotification(transaction, event, { targetUserIds: [id] });
       return this.toManagedUser(user);
     });
   }
@@ -190,12 +239,13 @@ export class AuthService {
     if (target.id === actor.user.id && !active) throw new ConflictException({ code: "CANNOT_DISABLE_SELF", message: "Vous ne pouvez pas désactiver votre propre compte." });
     return this.prisma.$transaction(async (transaction) => {
       if (!active && target.isActive && target.role === "ADMIN" && await transaction.user.count({ where: { role: "ADMIN", isActive: true } }) <= 1) throw new ConflictException({ code: "LAST_ADMIN", message: "Le dernier administrateur actif doit être conservé." });
-      const user = await transaction.user.update({ where: { id }, data: { isActive: active, disabledAt: active ? null : new Date(), ...(!active && target.role === "OPERATOR" ? { tabletAccessEnabled: false } : {}) }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, connectionKeyHash: true, createdAt: true, lastLoginAt: true } });
+      const user = await transaction.user.update({ where: { id }, data: { isActive: active, disabledAt: active ? null : new Date(), ...(!active && target.role === "OPERATOR" ? { tabletAccessEnabled: false } : {}) }, select: { id: true, username: true, displayName: true, role: true, isActive: true, tabletAccessEnabled: true, createdAt: true, lastLoginAt: true } });
       if (!active) {
         await transaction.session.deleteMany({ where: { userId: id } });
         await transaction.tabletAuthSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
       }
-      await transaction.historyEvent.create({ data: { eventType: active ? "USER_REACTIVATED" : "USER_DISABLED", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role } });
+      const event = await transaction.historyEvent.create({ data: { eventType: active ? "USER_REACTIVATED" : "USER_DISABLED", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role } });
+      await deliverBusinessNotification(transaction, event, { targetUserIds: [id] });
       return this.toManagedUser(user);
     });
   }
@@ -203,13 +253,15 @@ export class AuthService {
   async resetUserPassword(actor: AuthContext, id: string, input: unknown): Promise<void> {
     const parsed = resetUserPasswordSchema.safeParse(input);
     if (!parsed.success) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Vérifiez le nouveau mot de passe.", details: parsed.error.flatten() });
-    const target = await this.prisma.user.findUnique({ where: { id }, select: { id: true } });
+    const target = await this.prisma.user.findUnique({ where: { id }, select: { id: true, role: true } });
     if (!target) throw new NotFoundException({ code: "USER_NOT_FOUND", message: "Utilisateur introuvable." });
     const passwordHash = await argon2.hash(parsed.data.newPassword, { type: argon2.argon2id });
     await this.prisma.$transaction(async (transaction) => {
       await transaction.user.update({ where: { id }, data: { passwordHash } });
       await transaction.session.deleteMany({ where: { userId: id } });
-      await transaction.historyEvent.create({ data: { eventType: "USER_PASSWORD_RESET", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role } });
+      if (target.role === "OPERATOR") await transaction.tabletAuthSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+      const event = await transaction.historyEvent.create({ data: { eventType: "USER_PASSWORD_RESET", entityType: "USER", entityId: id, actorUserId: actor.user.id, actorRole: actor.user.role } });
+      await deliverBusinessNotification(transaction, event, { targetUserIds: [id] });
     });
   }
 

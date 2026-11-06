@@ -2,6 +2,7 @@ import { z } from "zod";
 import { normalizeProfile } from "./profile";
 export {
   calculateTotalWeightKg,
+  calculatePieceWeightKg,
   classifyProfile,
   normalizeProfile,
   profileFamilies,
@@ -9,7 +10,12 @@ export {
 export type { ProfileFamily } from "./profile";
 
 export const loginSchema = z.object({
-  username: z.string().trim().min(1, "L’identifiant est requis."),
+  username: z
+    .string()
+    .trim()
+    .min(3, "L’identifiant est requis.")
+    .max(40, "L’identifiant est trop long.")
+    .regex(/^[a-zA-Z0-9._-]+$/, "Identifiant invalide."),
   password: z.string().min(1, "Le mot de passe est requis."),
 });
 
@@ -94,6 +100,53 @@ export const createMachineSchema = z.object({
 
 export const updateMachineSchema = createMachineSchema.omit({ internalNumber: true, status: true });
 
+const materialProfileBaseSchema = z.object({
+  profile: z.string().trim().transform(normalizeProfile).pipe(z.string().min(1).max(80)),
+  aliases: z
+    .array(z.string().trim().transform(normalizeProfile).pipe(z.string().min(1).max(80)))
+    .max(30)
+    .default([]),
+  kgPerMeter: z.number().positive().max(100000),
+  rawLengthsMm: z.array(z.number().int().positive().max(1000000)).min(1).max(12),
+});
+const materialProfileLengthsAreUnique = <T extends { rawLengthsMm: number[] }>(
+  input: T,
+  context: z.RefinementCtx,
+): void => {
+  if (new Set(input.rawLengthsMm).size !== input.rawLengthsMm.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["rawLengthsMm"],
+      message: "Chaque longueur brute doit être unique.",
+    });
+  }
+};
+const materialProfileAliasesAreUnique = <T extends { profile: string; aliases: string[] }>(
+  input: T,
+  context: z.RefinementCtx,
+): void => {
+  const key = (value: string): string => value.replace(/\s+/g, "").toLocaleUpperCase();
+  const canonicalKey = key(input.profile);
+  const aliasKeys = input.aliases.map(key);
+  if (aliasKeys.some((aliasKey) => aliasKey === canonicalKey)) {
+    context.addIssue({
+      code: "custom",
+      path: ["aliases"],
+      message: "An alias cannot equal the canonical designation.",
+    });
+  }
+  if (new Set(aliasKeys).size !== aliasKeys.length) {
+    context.addIssue({ code: "custom", path: ["aliases"], message: "Aliases must be unique." });
+  }
+};
+export const materialProfileSchema = materialProfileBaseSchema
+  .superRefine(materialProfileLengthsAreUnique)
+  .superRefine(materialProfileAliasesAreUnique);
+export const updateMaterialProfileSchema = materialProfileBaseSchema
+  .extend({ isActive: z.boolean() })
+  .superRefine(materialProfileLengthsAreUnique)
+  .superRefine(materialProfileAliasesAreUnique);
+
 export const piecePrioritySchema = z.enum(["HIGH", "NORMAL", "LOW"]);
 export const pieceStatusSchema = z.enum([
   "PLANNED",
@@ -110,7 +163,8 @@ export const createPieceSchema = z.object({
     .trim()
     .min(1, "Le repère est requis.")
     .max(50, "Le repère est trop long.")
-    .regex(/^[a-zA-Z0-9._/-]+$/, "Le repère contient des caractères invalides."),
+    .regex(/^[a-zA-Z0-9._/-]+$/, "Le repère contient des caractères invalides.")
+    .optional(),
   quantity: z
     .number()
     .int()
@@ -123,8 +177,8 @@ export const createPieceSchema = z.object({
   quality: z
     .string()
     .trim()
-    .min(1, "La qualité est requise.")
     .max(80, "La qualité est trop longue.")
+    .transform((value) => value || "UNKNOWN")
     .default("UNKNOWN"),
   lengthMm: z
     .number()
@@ -144,18 +198,27 @@ export const createPieceSchema = z.object({
   designation: z
     .string()
     .trim()
-    .min(1, "La désignation est requise.")
     .max(160, "La désignation est trop longue.")
+    .transform((value) => value || "À compléter")
     .default("À compléter"),
   priority: piecePrioritySchema.default("NORMAL"),
   dueDate: z.coerce.date().optional(),
 });
 
-export const createManualPieceSchema = createPieceSchema.extend({
-  unitWeightKg: z
-    .number()
-    .positive("Le poids unitaire doit être supérieur à zéro.")
-    .max(100000, "Le poids est trop élevé."),
+export const createManualPieceSchema = createPieceSchema
+  .extend({
+    unitWeightKg: z
+      .number()
+      .positive("Le poids unitaire doit être supérieur à zéro.")
+      .max(100000, "Le poids est trop élevé."),
+  })
+  .partial({ unitWeightKg: true });
+
+export const createPieceBatchSchema = z.object({
+  pieces: z
+    .array(createPieceSchema)
+    .min(2, "Ajoutez au moins deux longueurs.")
+    .max(50, "Vous pouvez enregistrer au maximum 50 longueurs à la fois."),
 });
 
 export const updatePieceSchema = createPieceSchema.omit({ reference: true, quantity: true });
@@ -192,7 +255,12 @@ export const faconnageOptimizationSchema = z
           profile: z.string().trim().min(1).max(120),
           kerfMm: z.number().int().positive().max(100),
           rawLengths: z
-            .array(z.object({ lengthMm: z.number().int().positive().max(1_000_000) }))
+            .array(
+              z.object({
+                lengthMm: z.number().int().positive().max(1_000_000),
+                quantity: z.number().int().min(0).max(10_000).optional(),
+              }),
+            )
             .min(1)
             .max(24),
         }),
@@ -240,12 +308,26 @@ export const startProductionSchema = z.object({
 });
 
 export const operatorLoginSchema = z.object({
-  connectionKey: z.string().trim().min(16).max(128),
+  username: usernameSchema,
+  password: z.string().min(1, "Le mot de passe est requis.").max(128),
 });
 export const startMachineSessionSchema = z
   .object({
     machineId: machineIdSchema,
-    helperOperatorIds: z.array(z.string().trim().min(1).max(30)).max(8).default([]),
+    helperOperatorIds: z.array(z.string().trim().min(1).max(30)).max(100).default([]),
+  })
+  .superRefine(({ helperOperatorIds }, context) => {
+    if (new Set(helperOperatorIds).size !== helperOperatorIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["helperOperatorIds"],
+        message: "Un même opérateur ne peut être ajouté qu’une seule fois.",
+      });
+    }
+  });
+export const updateMachineSessionTeamSchema = z
+  .object({
+    helperOperatorIds: z.array(z.string().trim().min(1).max(30)).max(100),
   })
   .superRefine(({ helperOperatorIds }, context) => {
     if (new Set(helperOperatorIds).size !== helperOperatorIds.length) {
@@ -282,7 +364,21 @@ export const productionMonitorQuerySchema = z.object({
   offerId: z.string().trim().min(1).max(30).optional(),
   machineId: z.string().trim().min(1).max(30).optional(),
   status: z.enum(["FACONNEE", "AFFECTEE", "LANCEE", "FABRIQUEE"]).optional(),
+  page: z.coerce.number().int().min(1).max(1000000).default(1),
+  pageSize: z.coerce.number().int().min(10).max(50).default(20),
+  search: z.string().trim().max(80).optional(),
+  sortBy: z
+    .enum(["reference", "offer", "profile", "rawLengthMm", "wasteMm", "status", "createdAt"])
+    .optional(),
+  sortDirection: z.enum(["asc", "desc"]).optional(),
 });
+
+export const productionNonConformityQuerySchema = productionMonitorQuerySchema
+  .omit({ status: true, sortBy: true })
+  .extend({
+    sortBy: z.enum(["reference", "reason", "machine", "reportedBy", "reportedAt"]).optional(),
+    sortDirection: z.enum(["asc", "desc"]).optional(),
+  });
 
 export const qualityControlResultSchema = z.enum(["CONFORM", "NON_CONFORM"]);
 export const qualityDefectCategorySchema = z.enum([
@@ -339,6 +435,8 @@ export const historyQuerySchema = z.object({
   entityType: z.string().trim().max(40).optional(),
   actorUserId: z.string().trim().min(1).max(30).optional(),
   entityId: z.string().trim().min(1).max(30).optional(),
+  sortBy: z.enum(["eventType", "entityType", "actorName", "createdAt"]).optional(),
+  sortDirection: z.enum(["asc", "desc"]).optional(),
 });
 
 export const pieceListQuerySchema = z.object({
@@ -346,6 +444,40 @@ export const pieceListQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().max(80).optional().default(""),
   profile: z.string().trim().max(80).optional().default(""),
+  designation: z.string().trim().max(80).optional().default(""),
+  dueDateFrom: z.coerce.date().optional(),
+  dueDateTo: z.coerce.date().optional(),
+  priority: z.enum(["HIGH", "NORMAL", "LOW"]).optional(),
+  status: z.enum(["PLANNED", "ASSIGNED", "IN_PROGRESS", "COMPLETED", "ARCHIVED"]).optional(),
+  sortBy: z
+    .enum([
+      "reference",
+      "profile",
+      "quantity",
+      "status",
+      "quality",
+      "lengthMm",
+      "unitWeightKg",
+      "totalWeightKg",
+      "designation",
+    ])
+    .optional(),
+  sortDirection: z.enum(["asc", "desc"]).optional(),
+});
+
+export const deleteUnusedPiecesSchema = z.object({
+  pieceIds: z
+    .array(z.string().trim().min(1).max(128))
+    .min(1)
+    .max(100)
+    .superRefine((ids, context) => {
+      if (new Set(ids).size !== ids.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Les pièces sélectionnées doivent être uniques.",
+        });
+      }
+    }),
 });
 
 export const dashboardQuerySchema = z.object({
@@ -439,6 +571,7 @@ export type ResetUserPasswordInput = z.infer<typeof resetUserPasswordSchema>;
 export type CreateMachineInput = z.infer<typeof createMachineSchema>;
 export type UpdateMachineInput = z.infer<typeof updateMachineSchema>;
 export type CreatePieceInput = z.infer<typeof createPieceSchema>;
+export type CreatePieceBatchInput = z.infer<typeof createPieceBatchSchema>;
 export type UpdatePieceInput = z.infer<typeof updatePieceSchema>;
 export type PieceImportInput = z.infer<typeof pieceImportSchema>;
 export type FaconnageProfilesQuery = z.infer<typeof faconnageProfilesQuerySchema>;

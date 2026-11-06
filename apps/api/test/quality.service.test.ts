@@ -86,6 +86,7 @@ describe("QualityService", () => {
   it("lists pending units with manufacturing context", async () => {
     const prisma = {
       pieceUnit: {
+        count: vi.fn().mockResolvedValue(1),
         findMany: vi.fn().mockResolvedValue([
           {
             ...unit,
@@ -99,15 +100,16 @@ describe("QualityService", () => {
     };
     const service = createService(prisma as never);
 
-    await expect(service.listPending()).resolves.toMatchObject([
-      {
+    await expect(service.listPending()).resolves.toMatchObject({
+      units: [{
         pieceUnitId: unit.id,
         reference: "CMD-001",
         machineName: "CNC-01",
         operatorName: "Opérateur",
         status: "QUALITY_PENDING",
-      },
-    ]);
+      }],
+      pagination: { page: 1, pageSize: 20, total: 1 },
+    });
   });
 
   it("accepts a pending unit, persists the result, and records quality history", async () => {

@@ -17,6 +17,8 @@ export class CuttingBarsController {
     @Query("search") search?: string,
     @Query("status") status?: string,
     @Query("profile") profile?: string,
+    @Query("sortBy") sortBy?: string,
+    @Query("sortDirection") sortDirection?: string,
   ) {
     return this.bars.listBars(offerId, {
       page: page === undefined ? 1 : Number(page),
@@ -24,6 +26,8 @@ export class CuttingBarsController {
       search,
       status,
       profile,
+      sortBy,
+      sortDirection,
     });
   }
 
@@ -32,14 +36,32 @@ export class CuttingBarsController {
     return this.bars.getBarSummary(offerId);
   }
 
+  @Get("material-report")
+  async materialReport(@Param("offerId") offerId: string) {
+    return this.bars.getMaterialReport(offerId);
+  }
+
   @Get("bars/:barId")
   async detail(@Param("offerId") offerId: string, @Param("barId") barId: string) {
     return { bar: await this.bars.getBar(offerId, barId) };
   }
 
   @Get("bar-assignments")
-  async assignments(@Param("offerId") offerId: string) {
-    return this.bars.listAssignments(offerId);
+  async assignments(
+    @Param("offerId") offerId: string,
+    @Query("availablePage") availablePage?: string,
+    @Query("assignmentPage") assignmentPage?: string,
+    @Query("pageSize") pageSize?: string,
+    @Query("search") search?: string,
+    @Query("machineId") machineId?: string,
+  ) {
+    return this.bars.listAssignments(offerId, {
+      availablePage: availablePage === undefined ? 1 : Number(availablePage),
+      assignmentPage: assignmentPage === undefined ? 1 : Number(assignmentPage),
+      pageSize: pageSize === undefined ? 20 : Number(pageSize),
+      search,
+      machineId,
+    });
   }
 
   @Post("bar-assignments")

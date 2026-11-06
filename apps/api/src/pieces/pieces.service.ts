@@ -5,16 +5,21 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { Piece, PieceProductionStatus, PieceUnitStatus } from "@prisma/client";
 import * as XLSX from "xlsx";
 import { randomUUID } from "node:crypto";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { basename } from "node:path";
 import {
   calculateTotalWeightKg,
+  calculatePieceWeightKg,
   classifyProfile,
   createPieceSchema,
+  createPieceBatchSchema,
+  deleteUnusedPiecesSchema,
   faconnagePreparationSchema,
   normalizeProfile,
   pieceImportSchema,
@@ -38,6 +43,7 @@ import type {
 import type { CreatePieceInput } from "@nim/validation";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { RealtimeService } from "../realtime/realtime.service";
 import { PieceImageStorage } from "./piece-image.storage";
 
 type PieceImageRecord = {
@@ -53,15 +59,48 @@ type PieceImageRecord = {
 };
 
 type PieceWithUnitStatuses = Piece & {
-  units: Array<{ status: PieceUnitStatus; productionStatus: PieceProductionStatus }>;
+  units: Array<{
+    id?: string;
+    status: PieceUnitStatus;
+    productionStatus: PieceProductionStatus;
+    qualityStatus?: string;
+    currentMachineId?: string | null;
+    currentOperatorId?: string | null;
+    currentProductionOperatorId?: string | null;
+    startedAt?: Date | null;
+    manufacturedAt?: Date | null;
+    controlledAt?: Date | null;
+    _count?: {
+      assignments: number;
+      barMemberships: number;
+      productionOperations: number;
+      qualityControls: number;
+      qualityDispositions: number;
+      nonConformities: number;
+    };
+    cuttingPlanProposalItems?: Array<{
+      proposal: {
+        status: string;
+        cuttingPlan: { status: string };
+      };
+    }>;
+  }>;
   images?: PieceImageRecord[];
-  _count?: { images: number };
+  _count?: {
+    images: number;
+    productionOperations: number;
+    qualityControls: number;
+    qualityDispositions: number;
+    nonConformities: number;
+  };
 };
 
 type ManagedPieceListProjection = ManagedPiece & {
   offerId: string;
   productionStatusCounts: Record<PieceProductionStatus, number>;
   isUnstarted: boolean;
+  canDelete: boolean;
+  deleteBlockedReason: string | null;
 };
 
 type UploadedPieceImage = {
@@ -159,6 +198,31 @@ const pieceImageRules = {
   mimeTypes: new Set(["image/jpeg", "image/png", "image/webp"]),
 } as const;
 
+function nextSequentialPieceReference(references: string[]): string {
+  const matches = references.flatMap((reference, index) => {
+    const match = /^(.*?)(\d+)$/.exec(reference);
+    return match
+      ? [{ prefix: match[1], sequence: Number(match[2]), width: match[2].length, index }]
+      : [];
+  });
+  if (!matches.length) return "P-001";
+  const prefixes = new Map<string, { count: number; latestIndex: number }>();
+  for (const match of matches) {
+    const previous = prefixes.get(match.prefix);
+    prefixes.set(match.prefix, {
+      count: (previous?.count ?? 0) + 1,
+      latestIndex: Math.min(previous?.latestIndex ?? match.index, match.index),
+    });
+  }
+  const prefix = [...prefixes.entries()].sort(
+    (a, b) => b[1].count - a[1].count || a[1].latestIndex - b[1].latestIndex,
+  )[0][0];
+  const sequenceMatches = matches.filter((match) => match.prefix === prefix);
+  const next = Math.max(...sequenceMatches.map((match) => match.sequence)) + 1;
+  const width = Math.max(...sequenceMatches.map((match) => match.width));
+  return `${prefix}${String(next).padStart(width, "0")}`;
+}
+
 function normalizeImportHeader(value: string): string {
   return value
     .replace(/^\uFEFF/, "")
@@ -167,6 +231,10 @@ function normalizeImportHeader(value: string): string {
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "")
     .replace(/[^a-z0-9]/g, "");
+}
+
+function materialProfileKey(value: string): string {
+  return value.trim().replace(/\s+/g, "").toLocaleUpperCase();
 }
 
 function decodeHtml(value: string): string {
@@ -328,6 +396,7 @@ export class PiecesService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(PieceImageStorage)
     private readonly imageStorage: PieceImageStorage = new PieceImageStorage(),
+    @Optional() @Inject(RealtimeService) private readonly realtime?: RealtimeService,
   ) {}
 
   private async assertOfferActive(offerId: string): Promise<void> {
@@ -345,6 +414,38 @@ export class PiecesService {
           offer.status === "ARCHIVED"
             ? "Cette offre est archivée et ne peut plus recevoir de modifications."
             : "Les pièces sont verrouillées dès qu’un plan est validé. Repassez l’offre en brouillon avant de modifier ses pièces ou son façonnage.",
+      });
+    }
+  }
+
+  private async assertOfferAllowsUnusedPieceDeletion(offerId: string): Promise<void> {
+    const offer = await this.prisma.offer.findUnique({
+      where: { id: offerId },
+      select: { status: true },
+    });
+    if (!offer) {
+      throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Affaire introuvable." });
+    }
+    if (offer.status === "ARCHIVED") {
+      throw new BadRequestException({
+        code: "OFFER_ARCHIVED",
+        message: "Une affaire archivée ne peut plus être modifiée.",
+      });
+    }
+  }
+
+  private async assertOfferCanAddPiece(offerId: string): Promise<void> {
+    const offer = await this.prisma.offer.findUnique({
+      where: { id: offerId },
+      select: { status: true },
+    });
+    if (!offer) {
+      throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
+    }
+    if (offer.status !== "DRAFT" && offer.status !== "READY") {
+      throw new BadRequestException({
+        code: "OFFER_PIECES_LOCKED",
+        message: "Les pièces peuvent être ajoutées uniquement sur une offre en brouillon ou prête.",
       });
     }
   }
@@ -380,6 +481,45 @@ export class PiecesService {
 
   private toManagedPiece(piece: PieceWithUnitStatuses): ManagedPieceListProjection {
     const coverImage = piece.images?.[0];
+    const unitCountsMatch = piece.units.length === piece.quantity && piece.units.length > 0;
+    const unitsPendingAndUnused = piece.units.every(
+      (unit) =>
+        unit.status === "PENDING" &&
+        unit.productionStatus === "PENDING" &&
+        unit.qualityStatus === "NOT_INSPECTED" &&
+        !unit.currentMachineId &&
+        !unit.currentOperatorId &&
+        !unit.currentProductionOperatorId &&
+        !unit.startedAt &&
+        !unit.manufacturedAt &&
+        !unit.controlledAt &&
+        Object.values(unit._count ?? {}).every((count) => count === 0),
+    );
+    const proposalReferencesAreInactive = piece.units.every((unit) =>
+      (unit.cuttingPlanProposalItems ?? []).every(
+        ({ proposal }) =>
+          proposal.status === "CANCELLED" ||
+          (proposal.status === "PROPOSED" && proposal.cuttingPlan.status === "DRAFT"),
+      ),
+    );
+    const noPieceQualityOrProduction = [
+      piece._count?.productionOperations ?? 0,
+      piece._count?.qualityControls ?? 0,
+      piece._count?.qualityDispositions ?? 0,
+      piece._count?.nonConformities ?? 0,
+    ].every((count) => count === 0);
+    const deleteBlockedReason =
+      piece.status !== "PLANNED"
+        ? "La pièce n’est plus au statut En attente."
+        : !unitCountsMatch
+          ? "Les unités de production de cette pièce sont incomplètes."
+          : !unitsPendingAndUnused
+            ? "Une unité a déjà été engagée dans le façonnage, une affectation, la production ou la qualité."
+            : !proposalReferencesAreInactive
+              ? "Cette pièce figure dans le reliquat d’un plan partiellement validé. Annulez ce reliquat avant de la supprimer."
+              : !noPieceQualityOrProduction
+                ? "Cette pièce possède déjà un historique de production ou de qualité."
+                : null;
     const productionStatusCounts: Record<PieceProductionStatus, number> = {
       PENDING: 0,
       FACONNEE: 0,
@@ -413,10 +553,9 @@ export class PiecesService {
       coverImageUrl: coverImage
         ? `/pieces/${encodeURIComponent(piece.id)}/images/${encodeURIComponent(coverImage.id)}`
         : null,
-      isUnstarted:
-        piece.units.length === piece.quantity &&
-        piece.units.length > 0 &&
-        piece.units.every((unit) => unit.status === "PENDING"),
+      isUnstarted: unitCountsMatch && piece.units.every((unit) => unit.status === "PENDING"),
+      canDelete: deleteBlockedReason === null,
+      deleteBlockedReason,
     };
   }
 
@@ -766,6 +905,16 @@ export class PiecesService {
     const rows: PieceImportRow[] = [];
     const validInputs: Array<{ row: number; input: CreatePieceInput }> = [];
     const referencesInFile = new Map<string, number>();
+    const catalogProfiles = await this.prisma.materialProfile.findMany({
+      where: { isActive: true },
+      select: { profile: true, profileKey: true, aliases: true },
+    });
+    const profileNames = new Map<string, (typeof catalogProfiles)[number]>();
+    for (const catalogProfile of catalogProfiles) {
+      profileNames.set(catalogProfile.profileKey, catalogProfile);
+      for (const alias of catalogProfile.aliases)
+        profileNames.set(materialProfileKey(alias), catalogProfile);
+    }
     for (let index = headerIndex + 1; index < records.length; index += 1) {
       const values = records[index];
       if (!values.some((value) => value.trim().length > 0)) continue;
@@ -785,6 +934,7 @@ export class PiecesService {
       const errors: string[] = [];
       const warnings: string[] = [];
 
+      if (!raw.reference.trim()) errors.push("repère: obligatoire.");
       if (raw.quantity.trim() && quantity === undefined)
         errors.push("quantité: valeur numérique invalide.");
       if (raw.lengthMm.trim() && lengthMm === undefined)
@@ -794,10 +944,12 @@ export class PiecesService {
       if ((raw.totalWeightKg ?? "").trim() && totalWeightKg === undefined)
         errors.push("pds tot: valeur numérique invalide.");
 
+      const sourceProfile = normalizeProfile(raw.profile);
+      const catalogMatch = profileNames.get(materialProfileKey(sourceProfile));
       const candidate = {
         reference: raw.reference,
         quantity: quantity ?? Number.NaN,
-        profile: normalizeProfile(raw.profile),
+        profile: catalogMatch?.profile ?? sourceProfile,
         quality: raw.quality || (sourceFormat === "CSV" ? "UNKNOWN" : ""),
         lengthMm: lengthMm ?? Number.NaN,
         unitWeightKg,
@@ -840,6 +992,9 @@ export class PiecesService {
 
       rows.push({
         row: rowNumber,
+        ...(catalogMatch && catalogMatch.profileKey !== materialProfileKey(sourceProfile)
+          ? { canonicalProfile: catalogMatch.profile }
+          : {}),
         values: {
           reference: raw.reference,
           quantity: raw.quantity,
@@ -871,7 +1026,7 @@ export class PiecesService {
       });
     }
 
-    const references = validInputs.map(({ input }) => input.reference.toUpperCase());
+    const references = validInputs.map(({ input }) => input.reference!.toUpperCase());
     const existing = references.length
       ? await this.prisma.piece.findMany({
           where: { offerId, reference: { in: references } },
@@ -924,24 +1079,9 @@ export class PiecesService {
       });
     }
     try {
-      return await this.prisma.$transaction(async (transaction) => {
-        const batch = await transaction.importBatch.create({
-          data: {
-            offerId,
-            filename: prepared.filename,
-            status: "COMMITTED",
-            rowsTotal: prepared.preview.rowsTotal,
-            rowsCreated: prepared.validInputs.length,
-            rowsRejected: 0,
-            errors: prepared.preview.rows
-              .filter((row) => row.warnings.length > 0)
-              .map((row) => ({ row: row.row, warnings: row.warnings })),
-            completedAt: new Date(),
-            createdById: actor.user.id,
-          },
-        });
+      const result = await this.prisma.$transaction(async (transaction) => {
         for (const { input: pieceInput } of prepared.validInputs) {
-          const reference = pieceInput.reference.toUpperCase();
+          const reference = pieceInput.reference!.toUpperCase();
           const piece = await transaction.piece.create({
             data: {
               offerId,
@@ -974,7 +1114,6 @@ export class PiecesService {
               actorRole: actor.user.role,
               metadata: {
                 offerId,
-                batchId: batch.id,
                 sourceFormat: prepared.sourceFormat,
                 reference,
                 quantity: piece.quantity,
@@ -988,6 +1127,23 @@ export class PiecesService {
           });
         }
         if (prepared.validInputs.length > 0) {
+          const importEvent = await transaction.historyEvent.create({
+            data: {
+              eventType: "PIECES_IMPORTED",
+              entityType: "OFFER",
+              entityId: offerId,
+              actorUserId: actor.user.id,
+              actorRole: actor.user.role,
+              metadata: {
+                offerId,
+                rowsCreated: prepared.validInputs.length,
+                sourceFormat: prepared.sourceFormat,
+              },
+            },
+          });
+          await deliverBusinessNotification(transaction, importEvent, { offerId });
+        }
+        if (prepared.validInputs.length > 0) {
           await transaction.offer.update({
             where: { id: offerId },
             data: { materialRevision: { increment: 1 } },
@@ -998,8 +1154,6 @@ export class PiecesService {
           });
         }
         return {
-          batchId: batch.id,
-          filename: prepared.filename,
           sourceFormat: prepared.sourceFormat,
           status: "COMMITTED" as const,
           rowsTotal: prepared.preview.rowsTotal,
@@ -1008,6 +1162,15 @@ export class PiecesService {
           warningRows: prepared.preview.warningRows,
         };
       });
+      if (result.rowsCreated > 0) {
+        this.realtime?.publish({
+          type: "pieces.imported",
+          entityType: "OFFER",
+          entityId: offerId,
+          actorUserId: actor.user.id,
+        });
+      }
+      return result;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         throw new ConflictException({
@@ -1024,24 +1187,38 @@ export class PiecesService {
     totalProfiles: number;
     totalPieceRows: number;
   }> {
-    const units = await this.prisma.pieceUnit.findMany({
-      where: {
-        status: "PENDING",
-        assignments: { none: { active: true } },
-        barMemberships: { none: { active: true } },
-        piece: { ...(offerId ? { offerId } : {}), status: { not: "ARCHIVED" } },
-      },
-      select: { pieceId: true, piece: { select: { profile: true } } },
-    });
+    const [units, catalogProfiles] = await Promise.all([
+      this.prisma.pieceUnit.findMany({
+        where: {
+          status: "PENDING",
+          assignments: { none: { active: true } },
+          barMemberships: { none: { active: true } },
+          piece: { ...(offerId ? { offerId } : {}), status: { not: "ARCHIVED" } },
+        },
+        select: { pieceId: true, piece: { select: { profile: true } } },
+      }),
+      this.prisma.materialProfile.findMany({
+        where: { isActive: true },
+        select: { profile: true, aliases: true },
+      }),
+    ]);
+    const catalogueNames = new Map<string, string>();
+    for (const item of catalogProfiles) {
+      for (const name of [item.profile, ...item.aliases]) {
+        catalogueNames.set(materialProfileKey(name), item.profile);
+      }
+    }
     const grouped = new Map<string, AvailableProfile & { pieceIds: Set<string> }>();
     for (const unit of units) {
-      const profile = normalizeProfile(unit.piece.profile);
-      const current = grouped.get(profile);
+      const profileKey = materialProfileKey(unit.piece.profile);
+      const profile =
+        catalogueNames.get(profileKey) ?? normalizeProfile(unit.piece.profile).toLocaleUpperCase();
+      const current = grouped.get(profileKey);
       if (current) {
         current.pieceIds.add(unit.pieceId);
         current.totalQuantity += 1;
       } else {
-        grouped.set(profile, {
+        grouped.set(profileKey, {
           profile,
           family: classifyProfile(profile),
           pieceCount: 1,
@@ -1083,24 +1260,54 @@ export class PiecesService {
         details: parsed.error.flatten(),
       });
     }
-    const selectedProfiles = [...new Set(parsed.data.profiles.map(normalizeProfile))];
+    const catalogProfiles = await this.prisma.materialProfile.findMany({
+      where: { isActive: true },
+      select: { profile: true, aliases: true },
+    });
+    const catalogNameByKey = new Map<string, string>();
+    for (const item of catalogProfiles) {
+      for (const name of [item.profile, ...item.aliases]) {
+        catalogNameByKey.set(materialProfileKey(name), item.profile);
+      }
+    }
+    const selectedByKey = new Map<string, string>();
+    for (const value of parsed.data.profiles) {
+      const key = materialProfileKey(value);
+      const canonical = catalogNameByKey.get(key) ?? normalizeProfile(value).toLocaleUpperCase();
+      selectedByKey.set(materialProfileKey(canonical), canonical);
+    }
+    const selectedProfiles = [...selectedByKey.values()];
+    const selectedKeys = new Set(selectedByKey.keys());
+    const acceptedPieceProfiles = catalogProfiles
+      .filter((item) => selectedKeys.has(materialProfileKey(item.profile)))
+      .flatMap((item) => [item.profile, ...item.aliases]);
+    const profileNames = [...new Set([...selectedProfiles, ...acceptedPieceProfiles])];
     const units = await this.prisma.pieceUnit.findMany({
       where: {
         status: "PENDING",
         assignments: { none: { active: true } },
         barMemberships: { none: { active: true } },
-        piece: { offerId, status: { not: "ARCHIVED" }, profile: { in: selectedProfiles } },
+        piece: {
+          offerId,
+          status: { not: "ARCHIVED" },
+          profile: { in: profileNames, mode: "insensitive" },
+        },
       },
       select: { pieceId: true, piece: { select: { profile: true, lengthMm: true } } },
     });
     const aggregates = new Map<string, { profile: string; lengthMm: number; quantity: number }>();
     for (const unit of units) {
-      const key = `${unit.piece.profile}\u0000${unit.piece.lengthMm}`;
+      const profileKey = materialProfileKey(unit.piece.profile);
+      const profile =
+        catalogNameByKey.get(profileKey) ??
+        normalizeProfile(unit.piece.profile).toLocaleUpperCase();
+      if (!selectedKeys.has(materialProfileKey(profile))) continue;
+      const key = `${profile}\u0000${unit.piece.lengthMm}`;
       const current = aggregates.get(key);
       if (current) current.quantity += 1;
       else
         aggregates.set(key, {
-          profile: unit.piece.profile,
+          profile,
           lengthMm: unit.piece.lengthMm,
           quantity: 1,
         });
@@ -1137,7 +1344,6 @@ export class PiecesService {
     input: unknown = {},
   ): Promise<{
     pieces: ManagedPieceListProjection[];
-    profiles: string[];
     page: number;
     pageSize: number;
     total: number;
@@ -1151,10 +1357,33 @@ export class PiecesService {
         details: parsed.error.flatten(),
       });
     }
-    const { page, pageSize, search, profile } = parsed.data;
+    const {
+      page,
+      pageSize,
+      search,
+      profile,
+      designation,
+      dueDateFrom,
+      dueDateTo,
+      priority,
+      status,
+      sortBy,
+      sortDirection,
+    } = parsed.data;
     const where: Prisma.PieceWhereInput = {
       ...(offerId ? { offerId } : {}),
       ...(profile ? { profile } : {}),
+      ...(designation ? { designation: { equals: designation, mode: "insensitive" } } : {}),
+      ...(priority ? { priority } : {}),
+      ...(status ? { status } : {}),
+      ...(dueDateFrom || dueDateTo
+        ? {
+            dueDate: {
+              ...(dueDateFrom ? { gte: dueDateFrom } : {}),
+              ...(dueDateTo ? { lte: dueDateTo } : {}),
+            },
+          }
+        : {}),
       ...(search
         ? {
             OR: ["reference", "profile", "quality", "designation"].map((field) => ({
@@ -1163,40 +1392,74 @@ export class PiecesService {
           }
         : {}),
     };
-    const baseWhere: Prisma.PieceWhereInput = offerId ? { offerId } : {};
-    const [pieces, total, profileRows] = await Promise.all([
-      this.prisma.piece.findMany({
-        where,
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        include: {
-          units: { select: { status: true, productionStatus: true } },
-          images: {
-            select: pieceImageSelect,
-            orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-            take: 1,
-          },
-          _count: { select: { images: true } },
-        },
-        orderBy: [
+    const orderBy: Prisma.PieceOrderByWithRelationInput[] = sortBy
+      ? [{ [sortBy]: (sortDirection ?? "asc") as Prisma.SortOrder }, { id: "asc" }]
+      : [
+          { profile: "asc" },
           { status: "asc" },
           { priority: "asc" },
           { dueDate: "asc" },
           { createdAt: "desc" },
           { id: "asc" },
-        ],
+        ];
+    const [pieces, total] = await Promise.all([
+      this.prisma.piece.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy,
+        include: {
+          units: {
+            select: {
+              id: true,
+              status: true,
+              productionStatus: true,
+              qualityStatus: true,
+              currentMachineId: true,
+              currentOperatorId: true,
+              currentProductionOperatorId: true,
+              startedAt: true,
+              manufacturedAt: true,
+              controlledAt: true,
+              _count: {
+                select: {
+                  assignments: true,
+                  barMemberships: true,
+                  productionOperations: true,
+                  qualityControls: true,
+                  qualityDispositions: true,
+                  nonConformities: true,
+                },
+              },
+              cuttingPlanProposalItems: {
+                select: {
+                  proposal: {
+                    select: { status: true, cuttingPlan: { select: { status: true } } },
+                  },
+                },
+              },
+            },
+          },
+          images: {
+            select: pieceImageSelect,
+            orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+            take: 1,
+          },
+          _count: {
+            select: {
+              images: true,
+              productionOperations: true,
+              qualityControls: true,
+              qualityDispositions: true,
+              nonConformities: true,
+            },
+          },
+        },
       }),
       this.prisma.piece.count({ where }),
-      this.prisma.piece.findMany({
-        where: baseWhere,
-        distinct: ["profile"],
-        select: { profile: true },
-        orderBy: { profile: "asc" },
-      }),
     ]);
     return {
       pieces: pieces.map((piece) => this.toManagedPiece(piece)),
-      profiles: profileRows.map((row) => row.profile),
       page,
       pageSize,
       total,
@@ -1204,8 +1467,58 @@ export class PiecesService {
     };
   }
 
+  async listPieceFacets(offerId?: string): Promise<{
+    profiles: string[];
+    qualities: string[];
+    designations: string[];
+  }> {
+    if (offerId && (offerId.length > 128 || offerId.trim() !== offerId)) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "L’identifiant de l’affaire est invalide.",
+      });
+    }
+    if (offerId) {
+      const offer = await this.prisma.offer.findUnique({
+        where: { id: offerId },
+        select: { id: true },
+      });
+      if (!offer) {
+        throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Affaire introuvable." });
+      }
+    }
+    const facetWhere = offerId ? Prisma.sql`WHERE "offerId" = ${offerId}` : Prisma.empty;
+    const facetRows = await this.prisma.$queryRaw<
+      Array<{ kind: string; value: string | null }>
+    >(Prisma.sql`
+        SELECT 'profile'::text AS kind, "profile"::text AS value
+        FROM "Piece" ${facetWhere}
+        GROUP BY "profile"
+        UNION ALL
+        SELECT 'quality'::text AS kind, "quality"::text AS value
+        FROM "Piece" ${facetWhere}
+        GROUP BY "quality"
+        UNION ALL
+        SELECT 'designation'::text AS kind, "designation"::text AS value
+        FROM "Piece" ${facetWhere}
+        GROUP BY "designation"
+      `);
+    const facetValues = (kind: string): string[] =>
+      facetRows
+        .filter((row) => row.kind === kind && row.value)
+        .map((row) => row.value as string)
+        .sort((left, right) =>
+          left.localeCompare(right, "fr", { numeric: true, sensitivity: "base" }),
+        );
+    return {
+      profiles: facetValues("profile"),
+      qualities: facetValues("quality"),
+      designations: facetValues("designation"),
+    };
+  }
+
   async createPiece(actor: AuthContext, offerId: string, input: unknown): Promise<ManagedPiece> {
-    await this.assertOfferActive(offerId);
+    await this.assertOfferCanAddPiece(offerId);
     const parsed = createPieceSchema.safeParse(input);
     if (!parsed.success)
       throw new BadRequestException({
@@ -1213,27 +1526,42 @@ export class PiecesService {
         message: "Vérifiez les informations de la pièce.",
         details: parsed.error.flatten(),
       });
-    const reference = parsed.data.reference.toUpperCase();
-    if (
-      await this.prisma.piece.findFirst({ where: { offerId, reference }, select: { id: true } })
-    ) {
-      throw new ConflictException({
-        code: "PIECE_REFERENCE_TAKEN",
-        message: "Cette référence de pièce existe déjà.",
+    const profile = normalizeProfile(parsed.data.profile);
+    const unitWeightKg = await this.resolveUnitWeight(
+      profile,
+      parsed.data.lengthMm,
+      parsed.data.unitWeightKg,
+    );
+    const created = await this.prisma.$transaction(async (transaction) => {
+      // Serialize automatic references per Offer by locking its row before reading existing references.
+      await transaction.offer.update({
+        where: { id: offerId },
+        data: { materialRevision: { increment: 1 } },
       });
-    }
-
-    return this.prisma.$transaction(async (transaction) => {
+      const references = await transaction.piece.findMany({
+        where: { offerId },
+        select: { reference: true },
+        orderBy: { createdAt: "desc" },
+      });
+      const reference =
+        parsed.data.reference?.trim().toUpperCase() ||
+        nextSequentialPieceReference(references.map((piece) => piece.reference));
+      if (references.some((piece) => piece.reference.toUpperCase() === reference)) {
+        throw new ConflictException({
+          code: "PIECE_REFERENCE_TAKEN",
+          message: "Cette référence de pièce existe déjà.",
+        });
+      }
       const piece = await transaction.piece.create({
         data: {
           offerId,
           reference,
           quantity: parsed.data.quantity,
-          profile: normalizeProfile(parsed.data.profile),
+          profile,
           quality: parsed.data.quality,
           lengthMm: parsed.data.lengthMm,
-          unitWeightKg: parsed.data.unitWeightKg,
-          totalWeightKg: calculateTotalWeightKg(parsed.data.unitWeightKg, parsed.data.quantity),
+          unitWeightKg,
+          totalWeightKg: calculateTotalWeightKg(unitWeightKg, parsed.data.quantity),
           designation: parsed.data.designation,
           priority: parsed.data.priority,
           dueDate: parsed.data.dueDate,
@@ -1248,7 +1576,7 @@ export class PiecesService {
         },
         include: { units: { select: { status: true, productionStatus: true } } },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "PIECE_CREATED",
           entityType: "PIECE",
@@ -1258,16 +1586,165 @@ export class PiecesService {
           metadata: { offerId, reference, quantity: piece.quantity, priority: piece.priority },
         },
       });
-      await transaction.offer.update({
-        where: { id: offerId },
-        data: { materialRevision: { increment: 1 } },
-      });
+      await deliverBusinessNotification(transaction, event, { offerId });
       await transaction.cuttingPlan.updateMany({
         where: { offerId, status: "DRAFT" },
         data: { status: "ARCHIVED" },
       });
       return this.toManagedPiece(piece);
     });
+    this.realtime?.publish({
+      type: "piece.created",
+      entityType: "PIECE",
+      entityId: created.id,
+      actorUserId: actor.user.id,
+    });
+    return created;
+  }
+
+  async createPiecesBatch(
+    actor: AuthContext,
+    offerId: string,
+    input: unknown,
+  ): Promise<{ pieces: ManagedPiece[] }> {
+    await this.assertOfferCanAddPiece(offerId);
+    const parsed = createPieceBatchSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Vérifiez les longueurs et quantités des pièces.",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const inputs = await Promise.all(
+      parsed.data.pieces.map(async (piece) => {
+        const profile = normalizeProfile(piece.profile);
+        const unitWeightKg = await this.resolveUnitWeight(
+          profile,
+          piece.lengthMm,
+          piece.unitWeightKg,
+        );
+        return { input: piece, profile, unitWeightKg };
+      }),
+    );
+
+    const created = await this.prisma.$transaction(async (transaction) => {
+      // Lock the Offer before reading references, so generated repères remain unique under concurrent saves.
+      await transaction.offer.update({
+        where: { id: offerId },
+        data: { materialRevision: { increment: 1 } },
+      });
+      const existingPieces = await transaction.piece.findMany({
+        where: { offerId },
+        select: { reference: true },
+        orderBy: { createdAt: "desc" },
+      });
+      const references = existingPieces.map((piece) => piece.reference.toUpperCase());
+      const reservedReferences = new Set(references);
+      const createdPieces: ManagedPiece[] = [];
+
+      for (const { input: pieceInput, profile, unitWeightKg } of inputs) {
+        const reference =
+          pieceInput.reference?.trim().toUpperCase() || nextSequentialPieceReference(references);
+        if (reservedReferences.has(reference)) {
+          throw new ConflictException({
+            code: "PIECE_REFERENCE_TAKEN",
+            message: `La référence ${reference} existe déjà dans cette affaire.`,
+          });
+        }
+        reservedReferences.add(reference);
+        references.push(reference);
+
+        const piece = await transaction.piece.create({
+          data: {
+            offerId,
+            reference,
+            quantity: pieceInput.quantity,
+            profile,
+            quality: pieceInput.quality,
+            lengthMm: pieceInput.lengthMm,
+            unitWeightKg,
+            totalWeightKg: calculateTotalWeightKg(unitWeightKg, pieceInput.quantity),
+            designation: pieceInput.designation,
+            priority: pieceInput.priority,
+            dueDate: pieceInput.dueDate,
+            createdById: actor.user.id,
+            units: {
+              createMany: {
+                data: Array.from({ length: pieceInput.quantity }, (_, index) => ({
+                  sequenceNumber: index + 1,
+                })),
+              },
+            },
+          },
+          include: { units: { select: { status: true, productionStatus: true } } },
+        });
+        const event = await transaction.historyEvent.create({
+          data: {
+            eventType: "PIECE_CREATED",
+            entityType: "PIECE",
+            entityId: piece.id,
+            actorUserId: actor.user.id,
+            actorRole: actor.user.role,
+            metadata: {
+              offerId,
+              reference,
+              quantity: piece.quantity,
+              lengthMm: piece.lengthMm,
+              priority: piece.priority,
+            },
+          },
+        });
+        await deliverBusinessNotification(transaction, event, { offerId });
+        createdPieces.push(this.toManagedPiece(piece));
+      }
+
+      await transaction.cuttingPlan.updateMany({
+        where: { offerId, status: "DRAFT" },
+        data: { status: "ARCHIVED" },
+      });
+      return createdPieces;
+    });
+
+    for (const piece of created) {
+      this.realtime?.publish({
+        type: "piece.created",
+        entityType: "PIECE",
+        entityId: piece.id,
+        actorUserId: actor.user.id,
+      });
+    }
+    return { pieces: created };
+  }
+
+  private async resolveUnitWeight(
+    profile: string,
+    lengthMm: number,
+    providedWeight?: number,
+  ): Promise<number | undefined> {
+    if (providedWeight !== undefined) return providedWeight;
+    const catalogProfile = await this.prisma.materialProfile.findUnique({
+      where: { profileKey: profile.trim().replace(/\s+/g, "").toLocaleUpperCase() },
+      select: { kgPerMeter: true, isActive: true },
+    });
+    if (!catalogProfile?.isActive) return undefined;
+    return calculatePieceWeightKg(Number(catalogProfile.kgPerMeter), lengthMm);
+  }
+
+  async getNextPieceReference(offerId: string): Promise<{ reference: string }> {
+    const offer = await this.prisma.offer.findUnique({
+      where: { id: offerId },
+      select: { id: true },
+    });
+    if (!offer)
+      throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
+    const pieces = await this.prisma.piece.findMany({
+      where: { offerId },
+      select: { reference: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return { reference: nextSequentialPieceReference(pieces.map((piece) => piece.reference)) };
   }
 
   async updatePiece(
@@ -1283,8 +1760,14 @@ export class PiecesService {
         message: "Vérifiez les informations de la pièce.",
         details: parsed.error.flatten(),
       });
+    const profile = normalizeProfile(parsed.data.profile);
+    const unitWeightKg = await this.resolveUnitWeight(
+      profile,
+      parsed.data.lengthMm,
+      parsed.data.unitWeightKg,
+    );
     try {
-      return await this.prisma.$transaction(
+      const updated = await this.prisma.$transaction(
         async (transaction) => {
           const offer = await transaction.offer.findUnique({
             where: { id: offerId },
@@ -1293,11 +1776,15 @@ export class PiecesService {
           if (!offer) {
             throw new NotFoundException({ code: "OFFER_NOT_FOUND", message: "Offre introuvable." });
           }
-          if (offer.status !== "DRAFT" && offer.status !== "IN_PRODUCTION") {
+          if (
+            offer.status !== "DRAFT" &&
+            offer.status !== "READY" &&
+            offer.status !== "IN_PRODUCTION"
+          ) {
             throw new BadRequestException({
               code: "OFFER_PIECES_LOCKED",
               message:
-                "Les pièces ne peuvent être modifiées que sur une offre en brouillon ou en production.",
+                "Les pièces ne peuvent être modifiées que sur une offre en brouillon, prête ou en production.",
             });
           }
 
@@ -1329,11 +1816,11 @@ export class PiecesService {
           const piece = await transaction.piece.update({
             where: { id },
             data: {
-              profile: normalizeProfile(parsed.data.profile),
+              profile,
               quality: parsed.data.quality,
               lengthMm: parsed.data.lengthMm,
-              unitWeightKg: parsed.data.unitWeightKg,
-              totalWeightKg: calculateTotalWeightKg(parsed.data.unitWeightKg, target.quantity),
+              unitWeightKg,
+              totalWeightKg: calculateTotalWeightKg(unitWeightKg, target.quantity),
               designation: parsed.data.designation,
               priority: parsed.data.priority,
               dueDate: parsed.data.dueDate,
@@ -1341,7 +1828,7 @@ export class PiecesService {
             },
             include: { units: { select: { status: true, productionStatus: true } } },
           });
-          await transaction.historyEvent.create({
+          const event = await transaction.historyEvent.create({
             data: {
               eventType: "PIECE_UPDATED",
               entityType: "PIECE",
@@ -1376,6 +1863,7 @@ export class PiecesService {
               },
             },
           });
+          await deliverBusinessNotification(transaction, event, { offerId });
           await transaction.offer.update({
             where: { id: offerId },
             data: { materialRevision: { increment: 1 } },
@@ -1388,6 +1876,13 @@ export class PiecesService {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
+      this.realtime?.publish({
+        type: "piece.updated",
+        entityType: "PIECE",
+        entityId: updated.id,
+        actorUserId: actor.user.id,
+      });
+      return updated;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
         throw new ConflictException({
@@ -1415,13 +1910,13 @@ export class PiecesService {
       });
     }
 
-    return this.prisma.$transaction(async (transaction) => {
+    const archived = await this.prisma.$transaction(async (transaction) => {
       const piece = await transaction.piece.update({
         where: { id },
         data: { status: "ARCHIVED", version: { increment: 1 } },
         include: { units: { select: { status: true, productionStatus: true } } },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "PIECE_ARCHIVED",
           entityType: "PIECE",
@@ -1431,6 +1926,7 @@ export class PiecesService {
           metadata: { offerId, previousStatus: target.status, version: piece.version },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId });
       await transaction.offer.update({
         where: { id: offerId },
         data: { materialRevision: { increment: 1 } },
@@ -1441,5 +1937,222 @@ export class PiecesService {
       });
       return this.toManagedPiece(piece);
     });
+    this.realtime?.publish({
+      type: "piece.archived",
+      entityType: "PIECE",
+      entityId: archived.id,
+      actorUserId: actor.user.id,
+    });
+    return archived;
+  }
+
+  async deleteUnusedPieces(
+    actor: AuthContext,
+    offerId: string,
+    input: unknown,
+  ): Promise<{ deletedCount: number }> {
+    await this.assertOfferAllowsUnusedPieceDeletion(offerId);
+    const parsed = deleteUnusedPiecesSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "La sélection de pièces à supprimer est invalide.",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const pieceIds = parsed.data.pieceIds;
+    const loadTargets = (client: Prisma.TransactionClient | PrismaService) =>
+      client.piece.findMany({
+        where: { offerId, id: { in: pieceIds } },
+        include: {
+          units: {
+            select: {
+              id: true,
+              status: true,
+              productionStatus: true,
+              qualityStatus: true,
+              currentMachineId: true,
+              currentOperatorId: true,
+              currentProductionOperatorId: true,
+              startedAt: true,
+              manufacturedAt: true,
+              controlledAt: true,
+              _count: {
+                select: {
+                  assignments: true,
+                  barMemberships: true,
+                  productionOperations: true,
+                  qualityControls: true,
+                  qualityDispositions: true,
+                  nonConformities: true,
+                },
+              },
+              cuttingPlanProposalItems: {
+                select: {
+                  proposal: {
+                    select: { status: true, cuttingPlan: { select: { status: true } } },
+                  },
+                },
+              },
+            },
+          },
+          images: { select: pieceImageSelect },
+          _count: {
+            select: {
+              images: true,
+              productionOperations: true,
+              qualityControls: true,
+              qualityDispositions: true,
+              nonConformities: true,
+            },
+          },
+        },
+      });
+
+    const initialTargets = await loadTargets(this.prisma);
+    if (initialTargets.length !== pieceIds.length) {
+      throw new NotFoundException({
+        code: "PIECE_NOT_FOUND",
+        message: "Une ou plusieurs pièces sélectionnées sont introuvables dans cette affaire.",
+      });
+    }
+    const blockedReferences = initialTargets
+      .filter((piece) => !this.toManagedPiece(piece).canDelete)
+      .map((piece) => piece.reference);
+    if (blockedReferences.length > 0) {
+      throw new ConflictException({
+        code: "PIECE_NOT_UNUSED",
+        message:
+          "Suppression impossible : seules les pièces en attente, jamais engagées dans le façonnage, une affectation, la production ou le contrôle qualité peuvent être supprimées.",
+        details: { references: blockedReferences },
+      });
+    }
+
+    try {
+      const imageKeys = await this.prisma.$transaction(
+        async (transaction) => {
+          const targets = await loadTargets(transaction);
+          if (
+            targets.length !== pieceIds.length ||
+            targets.some((piece) => !this.toManagedPiece(piece).canDelete)
+          ) {
+            throw new ConflictException({
+              code: "PIECE_DELETE_CONFLICT",
+              message:
+                "Une pièce sélectionnée a changé d’état. Actualisez la liste puis réessayez.",
+            });
+          }
+
+          const targetUnitIds = targets.flatMap((piece) =>
+            piece.units.flatMap((unit) => (unit.id ? [unit.id] : [])),
+          );
+          const cancelledProposals = await transaction.cuttingPlanProposal.findMany({
+            where: {
+              status: "CANCELLED",
+              items: { some: { pieceUnitId: { in: targetUnitIds } } },
+            },
+            select: { id: true },
+          });
+          const cancelledProposalIds = cancelledProposals.map((proposal) => proposal.id);
+          if (cancelledProposalIds.length > 0) {
+            await transaction.cuttingPlanProposalItem.deleteMany({
+              where: {
+                proposalId: { in: cancelledProposalIds },
+                pieceUnitId: { in: targetUnitIds },
+              },
+            });
+          }
+
+          const draftPlans = await transaction.cuttingPlan.findMany({
+            where: { offerId, status: "DRAFT" },
+            select: { id: true, reference: true, proposals: { select: { id: true } } },
+          });
+          const draftProposalIds = draftPlans.flatMap((plan) =>
+            plan.proposals.map((proposal) => proposal.id),
+          );
+          if (draftProposalIds.length > 0) {
+            await transaction.cuttingPlanProposalItem.deleteMany({
+              where: { proposalId: { in: draftProposalIds } },
+            });
+          }
+          if (draftPlans.length > 0) {
+            await transaction.cuttingPlan.updateMany({
+              where: { id: { in: draftPlans.map((plan) => plan.id) }, status: "DRAFT" },
+              data: { status: "ARCHIVED" },
+            });
+          }
+
+          await transaction.historyEvent.createMany({
+            data: targets.map((piece) => ({
+              eventType: "PIECE_DELETED",
+              entityType: "PIECE",
+              entityId: piece.id,
+              actorUserId: actor.user.id,
+              actorRole: actor.user.role,
+              metadata: {
+                offerId,
+                reference: piece.reference,
+                profile: piece.profile,
+                quantity: piece.quantity,
+                lengthMm: piece.lengthMm,
+                previousStatus: piece.status,
+                invalidatedDraftPlans: draftPlans.map((plan) => plan.reference),
+                detachedCancelledProposalCount: cancelledProposalIds.length,
+              },
+            })),
+          });
+
+          const deleted = await transaction.piece.deleteMany({
+            where: {
+              offerId,
+              id: { in: pieceIds },
+              status: "PLANNED",
+            },
+          });
+          if (deleted.count !== pieceIds.length) {
+            throw new ConflictException({
+              code: "PIECE_DELETE_CONFLICT",
+              message:
+                "Une pièce sélectionnée a changé d’état. Actualisez la liste puis réessayez.",
+            });
+          }
+
+          await transaction.offer.update({
+            where: { id: offerId },
+            data: { materialRevision: { increment: 1 } },
+          });
+          return targets.flatMap((piece) => piece.images.map((image) => image.storageKey));
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      for (const storageKey of imageKeys) {
+        await this.imageStorage.remove(storageKey).catch((error) => {
+          this.logger.error(`Unable to remove image for deleted piece (${storageKey})`, error);
+        });
+      }
+      for (const id of pieceIds) {
+        this.realtime?.publish({
+          type: "piece.deleted",
+          entityType: "PIECE",
+          entityId: id,
+          actorUserId: actor.user.id,
+        });
+      }
+      return { deletedCount: pieceIds.length };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        ["P2003", "P2034"].includes(error.code)
+      ) {
+        throw new ConflictException({
+          code: "PIECE_DELETE_CONFLICT",
+          message:
+            "Une pièce sélectionnée vient d’être utilisée. Actualisez la liste avant de réessayer.",
+        });
+      }
+      throw error;
+    }
   }
 }

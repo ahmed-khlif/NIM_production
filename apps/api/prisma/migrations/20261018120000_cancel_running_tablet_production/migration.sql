@@ -1,0 +1,4 @@
+ALTER TYPE "ProductionRunStatus" ADD VALUE IF NOT EXISTS 'CANCELLED';
+
+ALTER TABLE "ProductionRun"
+ADD COLUMN "cancelledAt" TIMESTAMP(3);

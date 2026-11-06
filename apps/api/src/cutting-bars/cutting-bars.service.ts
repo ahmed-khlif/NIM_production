@@ -12,6 +12,8 @@ import { z } from "zod";
 import type { ManagedBarAssignment, ManagedCuttingBar, PieceUnitStatus } from "@nim/types";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { parseListSort } from "../list-sorting";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { RealtimeService } from "../realtime/realtime.service";
 
 const assignBarsSchema = z
@@ -30,7 +32,7 @@ const assignBarsSchema = z
   });
 
 const barInclude = {
-  offer: { select: { id: true, reference: true } },
+  offer: { select: { id: true, reference: true, revision: true } },
   items: {
     include: {
       pieceUnit: {
@@ -160,7 +162,7 @@ export class CuttingBarsService {
     return offer;
   }
 
-  async listBars(offerId: string, options: { page?: number; pageSize?: number; search?: string; status?: string; profile?: string } = {}) {
+  async listBars(offerId: string, options: { page?: number; pageSize?: number; search?: string; status?: string; profile?: string; sortBy?: string; sortDirection?: string } = {}) {
     await this.assertOffer(offerId);
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
@@ -194,11 +196,15 @@ export class CuttingBarsService {
         : {}),
     };
     const baseWhere = { offerId, status: { not: "CANCELLED" as const } };
+    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "profile", "rawLengthMm", "wasteMm", "status", "pieces", "createdAt"] as const, { sortBy: "createdAt", sortDirection: "asc" });
+    const orderBy: Prisma.CuttingBarOrderByWithRelationInput[] = sort.sortBy === "pieces"
+      ? [{ items: { _count: sort.sortDirection } }, { id: "asc" }]
+      : [{ [sort.sortBy]: sort.sortDirection }, { id: "asc" }];
     const [bars, total, groupedStatuses, profileGroups] = await Promise.all([
       this.prisma.cuttingBar.findMany({
       where,
       include: barInclude,
-      orderBy: [{ createdAt: "asc" }, { reference: "asc" }],
+      orderBy,
       skip: (page - 1) * pageSize,
       take: pageSize,
       }),
@@ -230,6 +236,153 @@ export class CuttingBarsService {
     };
   }
 
+  async getMaterialReport(offerId: string) {
+    const offer = await this.assertOffer(offerId);
+    const bars = await this.prisma.cuttingBar.findMany({
+      where: { offerId, status: { not: "CANCELLED" } },
+      select: {
+        reference: true,
+        profile: true,
+        rawLengthMm: true,
+        usedLengthMm: true,
+        wasteMm: true,
+        status: true,
+        cuttingPlan: { select: { reference: true } },
+        assignments: {
+          where: { active: true },
+          select: { machine: { select: { id: true, name: true } } },
+          take: 1,
+        },
+        items: {
+          where: { active: true },
+          select: {
+            pieceUnit: {
+              select: {
+                sequenceNumber: true,
+                piece: { select: { reference: true, lengthMm: true, unitWeightKg: true } },
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: [{ profile: "asc" }, { rawLengthMm: "asc" }],
+    });
+    const profileKeys = [...new Set(bars.map((bar) => bar.profile.trim().replace(/\s+/g, "").toLocaleUpperCase()))];
+    const catalogueProfiles = profileKeys.length
+      ? await this.prisma.materialProfile.findMany({
+          where: { profileKey: { in: profileKeys } },
+          select: { profileKey: true, kgPerMeter: true },
+        })
+      : [];
+    const kgPerMeterByProfile = new Map(
+      catalogueProfiles.map((profile) => [profile.profileKey, Number(profile.kgPerMeter)]),
+    );
+    const getBarNetWeight = (bar: (typeof bars)[number]): number | null => {
+      const profileKey = bar.profile.trim().replace(/\s+/g, "").toLocaleUpperCase();
+      const kgPerMeter = kgPerMeterByProfile.get(profileKey);
+      let total = 0;
+      for (const item of bar.items) {
+        const savedUnitWeight = item.pieceUnit.piece.unitWeightKg;
+        if (savedUnitWeight != null) total += Number(savedUnitWeight);
+        else if (kgPerMeter !== undefined) total += (item.pieceUnit.piece.lengthMm * kgPerMeter) / 1000;
+        else return null;
+      }
+      return total;
+    };
+    const groups = new Map<string, {
+      profile: string;
+      rawLengthMm: number;
+      quantity: number;
+      totalWasteMm: number;
+      netWeightKg: number;
+      netWeightComplete: boolean;
+    }>();
+    for (const bar of bars) {
+      const key = `${bar.profile}|${bar.rawLengthMm}`;
+      const group = groups.get(key) ?? {
+        profile: bar.profile,
+        rawLengthMm: bar.rawLengthMm,
+        quantity: 0,
+        totalWasteMm: 0,
+        netWeightKg: 0,
+        netWeightComplete: true,
+      };
+      group.quantity += 1;
+      group.totalWasteMm += bar.wasteMm;
+      const barNetWeightKg = getBarNetWeight(bar);
+      if (barNetWeightKg === null) group.netWeightComplete = false;
+      else group.netWeightKg += barNetWeightKg;
+      groups.set(key, group);
+    }
+    const materials = [...groups.values()].sort((a, b) =>
+      a.profile.localeCompare(b.profile, "fr", { numeric: true }) || a.rawLengthMm - b.rawLengthMm,
+    ).map((material) => {
+      const profileKey = material.profile.trim().replace(/\s+/g, "").toLocaleUpperCase();
+      const kgPerMeter = kgPerMeterByProfile.get(profileKey) ?? null;
+      return {
+        profile: material.profile,
+        rawLengthMm: material.rawLengthMm,
+        quantity: material.quantity,
+        totalWasteMm: material.totalWasteMm,
+        netWeightKg: material.netWeightComplete ? material.netWeightKg : null,
+        kgPerMeter,
+        grossWeightKg: kgPerMeter === null ? null : (material.rawLengthMm * material.quantity * kgPerMeter) / 1000,
+        wasteRate: material.rawLengthMm * material.quantity === 0
+          ? 0
+          : (material.totalWasteMm / (material.rawLengthMm * material.quantity)) * 100,
+      };
+    });
+    const profilesWithoutWeight = [...new Set(materials.filter((item) => item.kgPerMeter === null).map((item) => item.profile))];
+    const profilesWithoutNetWeight = [...new Set(materials.filter((item) => item.netWeightKg === null).map((item) => item.profile))];
+    const totalRawLengthMm = bars.reduce((sum, bar) => sum + bar.rawLengthMm, 0);
+    const totalWasteMm = bars.reduce((sum, bar) => sum + bar.wasteMm, 0);
+    return {
+      offer: {
+        id: offer.id,
+        reference: offer.reference,
+        revision: offer.revision,
+        name: offer.name,
+        clientName: offer.clientName,
+        site: offer.site,
+      },
+      generatedAt: new Date().toISOString(),
+      materials,
+      bars: bars.map((bar) => ({
+        reference: bar.reference,
+        profile: bar.profile,
+        rawLengthMm: bar.rawLengthMm,
+        usedLengthMm: bar.usedLengthMm,
+        wasteMm: bar.wasteMm,
+        status: bar.status,
+        cuttingPlanReference: bar.cuttingPlan.reference,
+        machine: bar.assignments?.[0]?.machine ?? null,
+        netWeightKg: getBarNetWeight(bar),
+        grossWeightKg: (() => {
+          const profileKey = bar.profile.trim().replace(/\s+/g, "").toLocaleUpperCase();
+          const kgPerMeter = kgPerMeterByProfile.get(profileKey);
+          return kgPerMeter === undefined ? null : (bar.rawLengthMm * kgPerMeter) / 1000;
+        })(),
+        items: bar.items.map((item) => ({
+          reference: item.pieceUnit.piece.reference,
+          sequenceNumber: item.pieceUnit.sequenceNumber,
+          lengthMm: item.pieceUnit.piece.lengthMm,
+        })),
+      })),
+      totals: {
+        barCount: bars.length,
+        totalRawLengthMm,
+        totalWasteMm,
+        profileCount: new Set(bars.map((bar) => bar.profile)).size,
+        netWeightKg: materials.reduce((sum, material) => sum + (material.netWeightKg ?? 0), 0),
+        grossWeightKg: materials.reduce((sum, material) => sum + (material.grossWeightKg ?? 0), 0),
+        profilesWithoutWeight,
+        profilesWithoutNetWeight,
+        wasteRate: totalRawLengthMm === 0 ? 0 : (totalWasteMm / totalRawLengthMm) * 100,
+      },
+    };
+  }
+
   async getBar(offerId: string, barId: string) {
     await this.assertOffer(offerId);
     const bar = await this.prisma.cuttingBar.findFirst({
@@ -257,26 +410,63 @@ export class CuttingBarsService {
     };
   }
 
-  async listAssignments(offerId: string) {
+  async listAssignments(offerId: string, options: { availablePage?: number; assignmentPage?: number; pageSize?: number; search?: string; machineId?: string } = {}) {
     await this.assertOffer(offerId);
-    const [availableBars, assignments] = await Promise.all([
+    const pageSize = options.pageSize ?? 20;
+    const availablePage = options.availablePage ?? 1;
+    const assignmentPage = options.assignmentPage ?? 1;
+    const search = options.search?.trim();
+    if (![availablePage, assignmentPage].every((page) => Number.isInteger(page) && page >= 1 && page <= 1_000_000) || ![10, 20, 50].includes(pageSize)) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La pagination des affectations de barres est invalide." });
+    }
+    if (search && search.length > 80) throw new BadRequestException({ code: "VALIDATION_ERROR", message: "La recherche est trop longue." });
+    const availableWhere: Prisma.CuttingBarWhereInput = {
+      offerId, status: "FACONNEE",
+      ...(search ? { OR: [
+        { reference: { contains: search, mode: "insensitive" } },
+        { profile: { contains: search, mode: "insensitive" } },
+      ] } : {}),
+    };
+    const assignmentWhere: Prisma.MachineBarAssignmentWhereInput = {
+      active: true,
+      cuttingBar: { offerId, ...(search ? { OR: [
+        { reference: { contains: search, mode: "insensitive" } },
+        { profile: { contains: search, mode: "insensitive" } },
+      ] } : {}) },
+      ...(options.machineId ? { machineId: options.machineId } : {}),
+    };
+    const [availableBars, assignments, availableTotal, assignmentTotal, machineGroups] = await Promise.all([
       this.prisma.cuttingBar.findMany({
-        where: { offerId, status: "FACONNEE" },
+        where: availableWhere,
         include: barInclude,
         orderBy: [{ profile: "asc" }, { reference: "asc" }],
+        skip: (availablePage - 1) * pageSize,
+        take: pageSize,
       }),
       this.prisma.machineBarAssignment.findMany({
-        where: { active: true, cuttingBar: { offerId } },
+        where: assignmentWhere,
         include: {
           machine: { select: { id: true, name: true } },
           cuttingBar: { include: barInclude },
         },
         orderBy: [{ machine: { name: "asc" } }, { assignedAt: "asc" }],
+        skip: (assignmentPage - 1) * pageSize,
+        take: pageSize,
       }),
+      this.prisma.cuttingBar.count({ where: availableWhere }),
+      this.prisma.machineBarAssignment.count({ where: assignmentWhere }),
+      this.prisma.machineBarAssignment.groupBy({ by: ["machineId"], where: { active: true, cuttingBar: { offerId } }, _count: { _all: true } }),
     ]);
     return {
       availableBars: availableBars.map(toManagedBar),
       assignments: assignments.map(toManagedBarAssignment),
+      availableCount: availableTotal,
+      assignmentCount: assignmentTotal,
+      machines: machineGroups.map((group) => ({ machineId: group.machineId, assignmentCount: group._count._all })),
+      pagination: {
+        available: { page: availablePage, pageSize, total: availableTotal, totalPages: Math.max(1, Math.ceil(availableTotal / pageSize)) },
+        assignments: { page: assignmentPage, pageSize, total: assignmentTotal, totalPages: Math.max(1, Math.ceil(assignmentTotal / pageSize)) },
+      },
     };
   }
 
@@ -284,7 +474,7 @@ export class CuttingBarsService {
   async createFromPlanProposals(
     transaction: PlanTransaction,
     actor: AuthContext,
-    offer: { id: string; reference: string },
+    offer: { id: string; reference: string; revision: string },
     plan: { id: string; reference: string },
     proposals: CuttingPlanProposalInput[],
   ): Promise<number> {
@@ -326,7 +516,7 @@ export class CuttingBarsService {
           offerId: offer.id,
           cuttingPlanId: plan.id,
           proposalId: proposal.id,
-          reference: `${offer.reference}-B${String(existingBars + index + 1).padStart(3, "0")}`,
+          reference: `${offer.revision}-${offer.reference}-B${String(existingBars + index + 1).padStart(3, "0")}`,
           profile: proposal.profile,
           rawLengthMm: proposal.rawLengthMm,
           usedLengthMm: proposal.usedLengthMm,
@@ -365,7 +555,7 @@ export class CuttingBarsService {
         },
       });
     }
-    await transaction.historyEvent.create({
+    const generatedEvent = await transaction.historyEvent.create({
       data: {
         eventType: "CUTTING_BARS_GENERATED",
         entityType: "CUTTING_PLAN",
@@ -381,6 +571,7 @@ export class CuttingBarsService {
         },
       },
     });
+    await deliverBusinessNotification(transaction, generatedEvent, { offerId: offer.id });
     return barIds.length;
   }
 
@@ -521,7 +712,7 @@ export class CuttingBarsService {
             });
             assignmentRecords.push({ id: barAssignmentId, cuttingBarId: bar.id, unitIds });
           }
-          await transaction.historyEvent.create({
+          const assignedEvent = await transaction.historyEvent.create({
             data: {
               eventType: "MACHINE_BARS_ASSIGNED",
               entityType: "MACHINE",
@@ -530,11 +721,14 @@ export class CuttingBarsService {
               actorRole: actor.user.role,
               metadata: {
                 offerId,
+                machineId: machine.id,
+                machineName: machine.name,
                 barIds: bars.map((bar) => bar.id),
                 barReferences: bars.map((bar) => bar.reference),
               },
             },
           });
+          await deliverBusinessNotification(transaction, assignedEvent, { offerId, machineId: machine.id });
           return { offerId, machineId: machine.id, assignmentRecords };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -645,7 +839,7 @@ export class CuttingBarsService {
               data: { status: "PLANNED", version: { increment: 1 } },
             });
         }
-        await transaction.historyEvent.create({
+        const event = await transaction.historyEvent.create({
           data: {
             eventType: "BAR_UNASSIGNED_FROM_MACHINE",
             entityType: "CUTTING_BAR",
@@ -662,6 +856,7 @@ export class CuttingBarsService {
             },
           },
         });
+        await deliverBusinessNotification(transaction, event, { offerId, machineId: activeAssignment.machineId });
         return { barId: bar.id, machineId: activeAssignment.machineId };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -720,7 +915,7 @@ export class CuttingBarsService {
           data: { status: "CANCELLED" },
           include: barInclude,
         });
-        await transaction.historyEvent.create({
+        const cancelledEvent = await transaction.historyEvent.create({
           data: {
             eventType: "CUTTING_BAR_CANCELLED",
             entityType: "CUTTING_BAR",
@@ -736,6 +931,7 @@ export class CuttingBarsService {
             },
           },
         });
+        await deliverBusinessNotification(transaction, cancelledEvent, { offerId });
         return updated;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },

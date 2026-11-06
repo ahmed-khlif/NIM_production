@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException } from "@nestjs/common";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../src/infrastructure/prisma/prisma.service";
 import { OffersService } from "../src/offers/offers.service";
@@ -52,7 +52,6 @@ describe("OffersService", () => {
       piece: { groupBy, findMany: vi.fn() },
       pieceUnit: { count: vi.fn().mockResolvedValue(4) },
       cuttingPlan: { findFirst, findMany: vi.fn().mockResolvedValue([validatedPlan]) },
-      importBatch: { findMany: vi.fn().mockResolvedValue([]) },
     };
 
     const result = await serviceWith(prisma as never).get("offer-a");
@@ -110,19 +109,34 @@ describe("OffersService", () => {
         groupBy: vi.fn().mockResolvedValue([]),
       },
       piece: {
-        findMany: vi.fn().mockResolvedValue([
-          { id: "piece-a", offerId: "offer-a", quantity: 3, profile: "IPE200" },
-          { id: "piece-b", offerId: "offer-b", quantity: 2, profile: "HEA140" },
-        ]),
-      },
-      pieceUnit: {
         groupBy: vi.fn().mockResolvedValue([
-          { pieceId: "piece-a", _count: { _all: 1 } },
-          { pieceId: "piece-b", _count: { _all: 2 } },
+          { offerId: "offer-a", profile: "IPE200", _count: { _all: 1 }, _sum: { quantity: 3 } },
+          { offerId: "offer-b", profile: "HEA140", _count: { _all: 1 }, _sum: { quantity: 2 } },
         ]),
       },
-      cuttingPlan: { findMany: vi.fn().mockResolvedValue([]) },
-      cuttingPlanProposal: { groupBy: vi.fn().mockResolvedValue([]) },
+      pieceUnit: {},
+      cuttingPlan: {},
+      cuttingPlanProposal: {
+        groupBy: vi.fn().mockResolvedValue([{ cuttingPlanId: "plan-a", _count: { _all: 2 } }]),
+      },
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { offerId: "offer-a", count: 1 },
+          { offerId: "offer-b", count: 2 },
+        ])
+        .mockResolvedValueOnce([
+          {
+            id: "plan-a",
+            offerId: "offer-a",
+            reference: "OFF-A-CP-001",
+            status: "PARTIALLY_VALIDATED",
+            totalBars: 5,
+            totalWasteMm: 300,
+            utilizationRate: "82.5",
+            createdAt: now,
+          },
+        ]),
     };
 
     const result = await serviceWith(prisma as never).list();
@@ -132,6 +146,8 @@ describe("OffersService", () => {
         totalUnits: 3,
         manufacturedUnits: 1,
         profileCount: 1,
+        plannedBars: 2,
+        latestPlan: expect.objectContaining({ id: "plan-a", status: "PARTIALLY_VALIDATED" }),
       }),
       expect.objectContaining({
         id: "offer-b",
@@ -141,6 +157,14 @@ describe("OffersService", () => {
       }),
     ]);
     expect(result.pagination).toMatchObject({ page: 1, pageSize: 20, total: 2, totalPages: 1 });
+    expect(prisma.piece.groupBy).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prisma.cuttingPlanProposal.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ["cuttingPlanId"],
+        where: { cuttingPlanId: { in: ["plan-a"] }, status: "VALIDATED" },
+      }),
+    );
   });
 
   it("rejects a duplicate business reference", async () => {
@@ -189,13 +213,13 @@ describe("OffersService", () => {
         }),
       },
       piece: { count: vi.fn().mockResolvedValue(1) },
-      importBatch: { count: vi.fn().mockResolvedValue(0) },
       cuttingPlan: { count: vi.fn().mockResolvedValue(0) },
     };
     const service = serviceWith(prisma as never);
 
     await expect(service.remove(actor, "offer-a")).rejects.toBeInstanceOf(BadRequestException);
   });
+
   it("returns production metrics isolated to one offer", async () => {
     const now = new Date("2026-10-14T10:00:00.000Z");
     const prisma = {
@@ -209,22 +233,27 @@ describe("OffersService", () => {
         }),
       },
       piece: {
+        count: vi.fn().mockResolvedValue(1),
+        aggregate: vi.fn().mockResolvedValue({ _sum: { quantity: 3 } }),
         findMany: vi.fn().mockResolvedValue([
           {
             id: "piece-1",
             reference: "P1",
             profile: "IPE200",
             quantity: 3,
-            status: "COMPLETED",
-            units: [{ status: "ACCEPTED" }, { status: "QUALITY_PENDING" }, { status: "SCRAPPED" }],
+            status: "ASSIGNED",
           },
         ]),
       },
       pieceUnit: {
-        groupBy: vi.fn().mockResolvedValue([
+        groupBy: vi.fn().mockResolvedValueOnce([
           { status: "ACCEPTED", _count: { _all: 1 } },
           { status: "QUALITY_PENDING", _count: { _all: 1 } },
           { status: "SCRAPPED", _count: { _all: 1 } },
+        ]).mockResolvedValueOnce([
+          { pieceId: "piece-1", status: "ACCEPTED", _count: { _all: 1 } },
+          { pieceId: "piece-1", status: "QUALITY_PENDING", _count: { _all: 1 } },
+          { pieceId: "piece-1", status: "SCRAPPED", _count: { _all: 1 } },
         ]),
         count: vi.fn().mockResolvedValue(1),
       },
@@ -232,7 +261,7 @@ describe("OffersService", () => {
       productionOperation: { count: vi.fn().mockResolvedValue(0) },
     };
 
-    const result = await serviceWith(prisma as never).getProductionSummary("offer-a");
+    const result = await serviceWith(prisma as never).getProductionSummary("offer-a", { search: "IPE", status: "ASSIGNED" });
     expect(result.totals).toMatchObject({
       totalUnits: 3,
       manufacturedUnits: 3,
@@ -248,6 +277,20 @@ describe("OffersService", () => {
       completedUnits: 3,
       resolvedUnits: 2,
     });
+    expect(prisma.piece.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ offerId: "offer-a", status: "ASSIGNED", OR: [
+        { reference: { contains: "IPE", mode: "insensitive" } },
+        { profile: { contains: "IPE", mode: "insensitive" } },
+      ] }),
+      orderBy: [{ profile: "asc" }, { reference: "asc" }, { id: "asc" }],
+    }));
+    expect(result.pagination.total).toBe(1);
+    expect(result.totals.pieceRows).toBe(1);
+  });
+
+  it("rejects unsupported piece-progress filters", async () => {
+    const prisma = { offer: { findUnique: vi.fn().mockResolvedValue({ id: "offer-a", status: "READY" }) } };
+    await expect(serviceWith(prisma as never).getProductionSummary("offer-a", { status: "UNKNOWN" })).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it("does not complete an offer while quality is unresolved", async () => {
@@ -293,6 +336,41 @@ describe("OffersService", () => {
     await expect(service.archive(actor, "offer-a")).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it("allows an administrator to override an active offer status and preserves production records", async () => {
+    const target = { id: "offer-a", reference: "OFF-A", status: "COMPLETED", version: 7 };
+    const transaction = {
+      offer: {
+        findUnique: vi.fn().mockResolvedValue(target),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      historyEvent: { create: vi.fn().mockResolvedValue({ id: "history-1" }) },
+    };
+    const prisma = { $transaction: vi.fn((callback: (tx: typeof transaction) => unknown) => callback(transaction)) };
+    const service = serviceWith(prisma as never);
+    vi.spyOn(service, "get").mockResolvedValue({ status: "DRAFT" } as never);
+
+    await expect(service.overrideStatus(actor, "offer-a", { status: "DRAFT" })).resolves.toMatchObject({ status: "DRAFT" });
+    expect(transaction.offer.updateMany).toHaveBeenCalledWith({
+      where: { id: "offer-a", version: 7, status: "COMPLETED" },
+      data: { status: "DRAFT", version: { increment: 1 } },
+    });
+    expect(transaction.historyEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        eventType: "OFFER_STATUS_OVERRIDDEN",
+        metadata: expect.objectContaining({ previousStatus: "COMPLETED", status: "DRAFT", productionDataPreserved: true }),
+      }),
+    }));
+  });
+
+  it("rejects status overrides from non-administrator roles", async () => {
+    const manager = { ...actor, user: { ...actor.user, role: "PRODUCTION_MANAGER" as const } };
+    await expect(serviceWith({} as never).overrideStatus(manager, "offer-a", { status: "READY" })).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it("does not allow the status override to archive an offer", async () => {
+    await expect(serviceWith({} as never).overrideStatus(actor, "offer-a", { status: "ARCHIVED" })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it("restores an archived offer as a draft and invalidates any approved plan", async () => {
     const now = new Date("2026-10-14T10:00:00.000Z");
     const archived = {
@@ -328,7 +406,6 @@ describe("OffersService", () => {
         findFirst: vi.fn().mockResolvedValue(null),
         findMany: vi.fn().mockResolvedValue([]),
       },
-      importBatch: { findMany: vi.fn().mockResolvedValue([]) },
       $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
         callback(transaction),
       ),

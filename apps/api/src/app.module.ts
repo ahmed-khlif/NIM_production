@@ -19,6 +19,8 @@ import { FaconnageModule } from "./faconnage/faconnage.module";
 import { OffersModule } from "./offers/offers.module";
 import { CuttingBarsModule } from "./cutting-bars/cutting-bars.module";
 import { OperatorsModule } from "./operators/operators.module";
+import { MaterialProfilesModule } from "./material-profiles/material-profiles.module";
+import { ClientsModule } from "./clients/clients.module";
 
 @Module({
   imports: [
@@ -45,6 +47,8 @@ import { OperatorsModule } from "./operators/operators.module";
     OffersModule,
     CuttingBarsModule,
     OperatorsModule,
+    MaterialProfilesModule,
+    ClientsModule,
   ],
 })
 export class AppModule {}

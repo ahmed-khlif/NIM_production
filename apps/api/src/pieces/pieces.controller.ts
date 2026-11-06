@@ -47,11 +47,27 @@ export class PiecesController {
     return this.piecesService.listPieces(undefined, query);
   }
 
+  @Get("facets")
+  async facets(): Promise<Awaited<ReturnType<PiecesService["listPieceFacets"]>>> {
+    return this.piecesService.listPieceFacets();
+  }
+
   @Get("profiles")
   @UseGuards(RolesGuard)
   @Roles("ADMIN", "PRODUCTION_MANAGER")
   async profiles(): Promise<Awaited<ReturnType<PiecesService["listAvailableProfiles"]>>> {
     return this.piecesService.listAvailableProfiles();
+  }
+
+  @Get("next-reference")
+  @UseGuards(RolesGuard)
+  @Roles("ADMIN", "PRODUCTION_MANAGER")
+  async nextReference(@Query("offerId") offerId?: string) {
+    const normalizedOfferId = offerId?.trim();
+    if (!normalizedOfferId || normalizedOfferId.length > 128) {
+      throw new BadRequestException({ code: "OFFER_CONTEXT_REQUIRED", message: "Ouvrez une affaire pour proposer le prochain repère." });
+    }
+    return this.piecesService.getNextPieceReference(normalizedOfferId);
   }
 
   @Post("faconnage/prepare")

@@ -11,8 +11,10 @@ import { z } from "zod";
 import type { CuttingPlanBarProposal, CuttingPlanStatus } from "@nim/types";
 import type { AuthContext } from "../auth/auth.types";
 import { PrismaService } from "../infrastructure/prisma/prisma.service";
+import { deliverBusinessNotification } from "../notifications/notification-delivery";
 import { CuttingOptimizer } from "./cutting-optimizer";
-import type { FaconnageOptimizationBatchResult, ProfileOptimizationInput } from "./faconnage.types";
+import { CuttingOptimizerExecution } from "./cutting-optimizer-execution";
+import { RawStockLimitError, type FaconnageOptimizationBatchResult, type ProfileOptimizationInput } from "./faconnage.types";
 import { CuttingBarsService } from "../cutting-bars/cutting-bars.service";
 
 const requirementSchema = z.object({
@@ -24,7 +26,10 @@ const profileSchema = z.object({
   profile: z.string().trim().min(1).max(120),
   requirements: z.array(requirementSchema).min(1).max(64),
   rawLengths: z
-    .array(z.object({ lengthMm: z.number().int().positive().max(1_000_000) }))
+    .array(z.object({
+      lengthMm: z.number().int().positive().max(1_000_000),
+      quantity: z.number().int().min(0).max(10_000).optional(),
+    }))
     .min(1)
     .max(24),
 });
@@ -70,6 +75,10 @@ function normalizeProfile(profile: string): string {
   return profile.trim().replace(/\s+/g, " ").toUpperCase();
 }
 
+function profileKey(profile: string): string {
+  return profile.trim().replace(/\s+/g, "").toUpperCase();
+}
+
 function roundRate(used: number, raw: number): number {
   if (raw <= 0) return 0;
   return Math.round((used / raw) * 10000) / 100;
@@ -81,6 +90,7 @@ export class FaconnageService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(CuttingOptimizer) private readonly optimizer: CuttingOptimizer,
     @Inject(CuttingBarsService) private readonly cuttingBars: CuttingBarsService,
+    @Inject(CuttingOptimizerExecution) private readonly optimizerExecution?: CuttingOptimizerExecution,
   ) {}
 
   private async findOffer(offerId: string) {
@@ -257,7 +267,19 @@ export class FaconnageService {
               "Au moins une barre a déjà été validée ou n’appartient pas à ce plan. Actualisez la page.",
           });
         }
-        for (const proposal of selected) this.assertProposalUnitsMatch(proposal, offerId);
+        const materialProfiles = await transaction.materialProfile.findMany({
+          select: { profile: true, aliases: true },
+        });
+        const catalogueProfileKeys = new Map<string, string>();
+        for (const item of materialProfiles) {
+          const canonicalKey = profileKey(item.profile);
+          for (const name of [item.profile, ...item.aliases]) {
+            catalogueProfileKeys.set(profileKey(name), canonicalKey);
+          }
+        }
+        for (const proposal of selected) {
+          this.assertProposalUnitsMatch(proposal, offerId, catalogueProfileKeys);
+        }
 
         const claimed = await transaction.cuttingPlanProposal.updateMany({
           where: {
@@ -371,6 +393,7 @@ export class FaconnageService {
       };
     }>,
     offerId: string,
+    catalogueProfileKeys: ReadonlyMap<string, string> = new Map(),
   ): void {
     if (
       proposal.rawLengthMm !== proposal.usedLengthMm + proposal.wasteMm ||
@@ -403,7 +426,8 @@ export class FaconnageService {
         pieceUnit.status !== "PENDING" ||
         pieceUnit.piece.offerId !== offerId ||
         pieceUnit.piece.status === "ARCHIVED" ||
-        normalizeProfile(pieceUnit.piece.profile) !== normalizeProfile(proposal.profile) ||
+        (catalogueProfileKeys.get(profileKey(pieceUnit.piece.profile)) ?? profileKey(pieceUnit.piece.profile)) !==
+          (catalogueProfileKeys.get(profileKey(proposal.profile)) ?? profileKey(proposal.profile)) ||
         pieceUnit.assignments.length > 0 ||
         pieceUnit.barMemberships.length > 0 ||
         pieceUnit.productionOperations.length > 0
@@ -467,7 +491,7 @@ export class FaconnageService {
         where: { id: planId },
         data: { status: "CANCELLED" },
       });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "CUTTING_PLAN_CANCELLED",
           entityType: "CUTTING_PLAN",
@@ -482,6 +506,7 @@ export class FaconnageService {
           },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId });
       return {
         id: target.id,
         status: "CANCELLED" as const,
@@ -489,6 +514,54 @@ export class FaconnageService {
       };
     });
     return plan;
+  }
+
+  async reviseValidatedPlan(actor: AuthContext, offerId: string, planId: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "Offer" WHERE "id" = ${offerId} FOR UPDATE`);
+      await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "CuttingPlan" WHERE "id" = ${planId} AND "offerId" = ${offerId} FOR UPDATE`);
+      const offer = await transaction.offer.findUnique({ where: { id: offerId } });
+      const plan = await transaction.cuttingPlan.findFirst({ where: { id: planId, offerId } });
+      if (!offer || !plan) throw new NotFoundException({ code: !offer ? "OFFER_NOT_FOUND" : "CUTTING_PLAN_NOT_FOUND", message: !offer ? "Offre introuvable." : "Plan de coupe introuvable." });
+      if (offer.status !== "DRAFT" && offer.status !== "READY") throw new ConflictException({ code: "OFFER_FACONNAGE_LOCKED", message: "Un plan ne peut être révisé qu’avant le démarrage de la production." });
+      if (plan.status !== "VALIDATED" && plan.status !== "APPROVED") throw new ConflictException({ code: "CUTTING_PLAN_NOT_REVISABLE", message: "Seul un plan entièrement validé peut être révisé ici." });
+
+      const bars = await transaction.cuttingBar.findMany({
+        where: { cuttingPlanId: planId, offerId },
+        include: {
+          assignments: { where: { active: true }, select: { id: true } },
+          items: { where: { active: true }, include: { pieceUnit: { select: { id: true, status: true } } } },
+        },
+      });
+      for (const bar of bars) {
+        if (bar.status !== "FACONNEE" || bar.assignments.length > 0) {
+          throw new ConflictException({ code: "CUTTING_PLAN_BARS_IN_USE", message: `La barre ${bar.reference} est affectée ou a commencé. Retirez-la de la machine avant de réviser le plan.` });
+        }
+        if (bar.items.some((item) => item.pieceUnit.status !== "FACONNEE")) {
+          throw new ConflictException({ code: "CUTTING_PLAN_UNITS_IN_USE", message: `Les pièces de ${bar.reference} ne peuvent plus être libérées en toute sécurité.` });
+        }
+      }
+      const unitIds = bars.flatMap((bar) => bar.items.map((item) => item.pieceUnitId));
+      const updatedUnits = unitIds.length ? await transaction.pieceUnit.updateMany({
+        where: { id: { in: unitIds }, status: "FACONNEE", assignments: { none: { active: true } }, productionOperations: { none: { status: "IN_PROGRESS" } } },
+        data: { status: "PENDING", productionStatus: "PENDING", version: { increment: 1 } },
+      }) : { count: 0 };
+      if (updatedUnits.count !== unitIds.length) throw new ConflictException({ code: "CUTTING_PLAN_UNITS_IN_USE", message: "Certaines pièces ont été affectées ailleurs. Actualisez puis réessayez." });
+      const now = new Date();
+      await transaction.cuttingBarItem.updateMany({ where: { cuttingBarId: { in: bars.map((bar) => bar.id) }, active: true }, data: { active: false, releasedAt: now } });
+      const cancelledBars = bars.length ? await transaction.cuttingBar.updateMany({ where: { id: { in: bars.map((bar) => bar.id) }, status: "FACONNEE" }, data: { status: "CANCELLED" } }) : { count: 0 };
+      if (cancelledBars.count !== bars.length) throw new ConflictException({ code: "CUTTING_PLAN_BARS_IN_USE", message: "Une barre vient d’être affectée. Actualisez puis réessayez." });
+      await transaction.cuttingPlanProposal.updateMany({ where: { cuttingPlanId: planId, status: "VALIDATED" }, data: { status: "CANCELLED", cancelledAt: now } });
+      await transaction.cuttingPlan.update({ where: { id: planId }, data: { status: "CANCELLED" } });
+      await transaction.offer.update({ where: { id: offerId }, data: { ...(offer.status === "READY" ? { status: "DRAFT" } : {}), version: { increment: 1 } } });
+      const event = await transaction.historyEvent.create({ data: {
+        eventType: "CUTTING_PLAN_REVISED", entityType: "CUTTING_PLAN", entityId: planId,
+        actorUserId: actor.user.id, actorRole: actor.user.role,
+        metadata: { offerId, reference: plan.reference, cancelledBarCount: bars.length, releasedPieceUnitCount: unitIds.length, previousStatus: plan.status },
+      } });
+      await deliverBusinessNotification(transaction, event, { offerId });
+      return { id: planId, status: "CANCELLED" as const, cancelledBarCount: bars.length, releasedPieceUnitCount: unitIds.length };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async deleteDraftPlan(actor: AuthContext, offerId: string, planId: string) {
@@ -518,7 +591,7 @@ export class FaconnageService {
         await transaction.cuttingPlanProposal.deleteMany({ where: { id: { in: proposalIds } } });
       }
       await transaction.cuttingPlan.delete({ where: { id: planId } });
-      await transaction.historyEvent.create({
+      const event = await transaction.historyEvent.create({
         data: {
           eventType: "CUTTING_PLAN_DELETED",
           entityType: "CUTTING_PLAN",
@@ -528,6 +601,7 @@ export class FaconnageService {
           metadata: { offerId, reference: target.reference, deletedProposalCount: proposalIds.length },
         },
       });
+      await deliverBusinessNotification(transaction, event, { offerId });
       return { id: planId, reference: target.reference, deletedAt: new Date().toISOString() };
     }, { maxWait: 10_000, timeout: 30_000 });
   }
@@ -558,9 +632,21 @@ export class FaconnageService {
       const requirements = [...grouped.entries()]
         .map(([lengthMm, quantity]) => ({ lengthMm, quantity }))
         .sort((left, right) => right.lengthMm - left.lengthMm);
-      const rawLengths = [...new Set(profile.rawLengths.map((item) => item.lengthMm))]
-        .sort((a, b) => a - b)
-        .map((lengthMm) => ({ lengthMm }));
+      const rawLengthOptions = new Map<number, number | undefined>();
+      for (const option of profile.rawLengths) {
+        const previous = rawLengthOptions.get(option.lengthMm);
+        rawLengthOptions.set(
+          option.lengthMm,
+          rawLengthOptions.has(option.lengthMm) && previous === undefined
+            ? undefined
+            : option.quantity === undefined || previous === undefined
+              ? option.quantity
+              : previous + option.quantity,
+        );
+      }
+      const rawLengths = [...rawLengthOptions.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([lengthMm, quantity]) => ({ lengthMm, ...(quantity === undefined ? {} : { quantity }) }));
       const longestPiece = Math.max(...requirements.map((item) => item.lengthMm));
       const longestRaw = Math.max(...rawLengths.map((item) => item.lengthMm));
       if (longestPiece > longestRaw) {
@@ -572,6 +658,23 @@ export class FaconnageService {
       return { profile: normalizeProfile(profile.profile), requirements, rawLengths };
     });
 
+    const materialProfiles = await this.prisma.materialProfile.findMany({
+      where: { isActive: true },
+      select: { profile: true, aliases: true },
+    });
+    const catalogueKeyByName = new Map<string, string>();
+    for (const item of materialProfiles) {
+      const canonicalKey = profileKey(item.profile);
+      for (const name of [item.profile, ...item.aliases]) {
+        catalogueKeyByName.set(profileKey(name), canonicalKey);
+      }
+    }
+    const selectedProfileKeys = new Set(profiles.map((item) => profileKey(item.profile)));
+    const acceptedCatalogueProfiles = materialProfiles
+      .filter((item) => selectedProfileKeys.has(profileKey(item.profile)))
+      .flatMap((item) => [item.profile, ...item.aliases]);
+    const profileNames = [...new Set([...profiles.map((item) => item.profile), ...acceptedCatalogueProfiles])];
+
     // Defense in depth: only profiles/quantities originating from this Offer are allowed.
     const existing = await this.prisma.pieceUnit.findMany({
       where: {
@@ -581,22 +684,26 @@ export class FaconnageService {
         piece: {
           offerId,
           status: { not: "ARCHIVED" },
-          profile: { in: profiles.map((item) => item.profile) },
+          profile: { in: profileNames, mode: "insensitive" },
         },
       },
       select: { id: true, piece: { select: { profile: true, lengthMm: true } } },
       orderBy: [{ pieceId: "asc" }, { sequenceNumber: "asc" }],
     });
     const allowed = new Map<string, number>();
-    const unitPools = new Map<string, string[]>();
+    const unitPools = new Map<string, { ids: string[]; nextIndex: number }>();
     for (const unit of existing) {
-      const key = `${normalizeProfile(unit.piece.profile)}\u0000${unit.piece.lengthMm}`;
+      const canonicalProfileKey =
+        catalogueKeyByName.get(profileKey(unit.piece.profile)) ?? profileKey(unit.piece.profile);
+      const key = `${canonicalProfileKey}\u0000${unit.piece.lengthMm}`;
       allowed.set(key, (allowed.get(key) ?? 0) + 1);
-      unitPools.set(key, [...(unitPools.get(key) ?? []), unit.id]);
+      const pool = unitPools.get(key);
+      if (pool) pool.ids.push(unit.id);
+      else unitPools.set(key, { ids: [unit.id], nextIndex: 0 });
     }
     for (const profile of profiles) {
       for (const requirement of profile.requirements) {
-        const available = allowed.get(`${profile.profile}\u0000${requirement.lengthMm}`) ?? 0;
+        const available = allowed.get(`${profileKey(profile.profile)}\u0000${requirement.lengthMm}`) ?? 0;
         if (requirement.quantity > available) {
           throw new BadRequestException({
             code: "FACONNAGE_REQUIREMENT_OUTSIDE_OFFER",
@@ -606,7 +713,20 @@ export class FaconnageService {
       }
     }
 
-    const results = await Promise.all(profiles.map((profile) => this.optimizer.optimize(profile)));
+    let results;
+    try {
+      results = this.optimizerExecution
+        ? await this.optimizerExecution.optimize(profiles)
+        : await Promise.all(profiles.map((profile) => this.optimizer.optimize(profile)));
+    } catch (error) {
+      if (error instanceof RawStockLimitError) {
+        throw new BadRequestException({
+          code: "FACONNAGE_RAW_STOCK_INSUFFICIENT",
+          message: `La quantité de matière brute disponible ne suffit pas pour le profil ${error.profile}. Augmentez le stock disponible ou ajoutez une longueur brute.`,
+        });
+      }
+      throw error;
+    }
     const createdAt = new Date();
     const reference = `${offer.reference}-CP-${createdAt.toISOString().slice(0, 10).replace(/-/g, "")}-${randomUUID().slice(0, 6).toUpperCase()}`;
     const proposalSpecs = results.flatMap((result) => result.bars.map((bar) => ({ result, bar })));
@@ -625,16 +745,18 @@ export class FaconnageService {
     for (const [index, { result, bar }] of proposalSpecs.entries()) {
       const pieceUnitIds: string[] = [];
       for (const cut of bar.cuts) {
-        const key = `${normalizeProfile(result.profile)}\u0000${cut.lengthMm}`;
-        const pool = unitPools.get(key) ?? [];
-        if (pool.length < cut.quantity) {
+        const key = `${profileKey(result.profile)}\u0000${cut.lengthMm}`;
+        const pool = unitPools.get(key);
+        const remaining = pool ? pool.ids.length - pool.nextIndex : 0;
+        if (!pool || remaining < cut.quantity) {
           throw new ConflictException({
             code: "FACONNAGE_DEMAND_CHANGED",
             message:
               "Les pièces disponibles ont changé pendant le calcul. Actualisez puis relancez le façonnage.",
           });
         }
-        pieceUnitIds.push(...pool.splice(0, cut.quantity));
+        pieceUnitIds.push(...pool.ids.slice(pool.nextIndex, pool.nextIndex + cut.quantity));
+        pool.nextIndex += cut.quantity;
       }
       proposals.push({
         id: randomUUID(),

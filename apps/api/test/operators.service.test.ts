@@ -25,7 +25,7 @@ function config() {
 }
 
 describe("Operator tablet credentials on existing Users", () => {
-  it("issues an Argon2id key to an existing OPERATOR User and returns it once", async () => {
+  it("toggles tablet access without issuing a separate credential", async () => {
     const user = {
       id: "user-1",
       username: "ahmed",
@@ -33,17 +33,17 @@ describe("Operator tablet credentials on existing Users", () => {
       role: "OPERATOR",
       isActive: true,
       tabletAccessEnabled: true,
-      connectionKeyHash: "argon-hash",
       lastLoginAt: null,
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
     };
     const transaction = {
-      user: { update: vi.fn().mockResolvedValue(user) },
+      user: { update: vi.fn().mockResolvedValue({ ...user, tabletAccessEnabled: false }) },
       tabletAuthSession: { updateMany: vi.fn() },
       historyEvent: { create: vi.fn() },
     };
     const prisma = {
       user: { findFirst: vi.fn().mockResolvedValue({ id: user.id, isActive: true }) },
+      machineSessionOperator: { findFirst: vi.fn().mockResolvedValue(null) },
       $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
         callback(transaction),
       ),
@@ -56,7 +56,6 @@ describe("Operator tablet credentials on existing Users", () => {
         role: value.role,
         isActive: value.isActive,
         tabletAccessEnabled: value.tabletAccessEnabled,
-        hasConnectionKey: Boolean(value.connectionKeyHash),
         createdAt: value.createdAt.toISOString(),
         lastLoginAt: null,
       })),
@@ -66,14 +65,11 @@ describe("Operator tablet credentials on existing Users", () => {
       auth as never as AuthService,
     );
 
-    const result = await service.resetConnectionKey(manager, user.id);
+    const result = await service.setTabletAccess(manager, user.id, false);
     const updateData = transaction.user.update.mock.calls[0]?.[0].data;
 
-    expect(result.user).toMatchObject({ id: user.id, displayName: user.displayName });
-    expect(result.user).not.toHaveProperty("connectionKeyHash");
-    expect(result.connectionKey).toMatch(/^NIM-[0-9A-F]{12}-[0-9A-F]{32}$/);
-    expect(await argon2.verify(updateData.connectionKeyHash, result.connectionKey)).toBe(true);
-    expect(updateData).toHaveProperty("tabletAccessEnabled", true);
+    expect(result.user).toMatchObject({ id: user.id, displayName: user.displayName, tabletAccessEnabled: false });
+    expect(updateData).toEqual({ tabletAccessEnabled: false });
     expect(transaction.tabletAuthSession.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { userId: user.id, revokedAt: null } }),
     );
@@ -83,7 +79,7 @@ describe("Operator tablet credentials on existing Users", () => {
           entityType: "USER",
           entityId: user.id,
           actorUserId: manager.user.id,
-          eventType: "OPERATOR_KEY_RESET",
+          eventType: "OPERATOR_TABLET_DEACTIVATED",
         }),
       }),
     );
@@ -111,17 +107,17 @@ describe("Operator tablet credentials on existing Users", () => {
 
 describe("OperatorAuthService authenticates the canonical User", () => {
   it("authenticates an OPERATOR User and records the same User ID in history", async () => {
-    const connectionKey = "NIM-ABCDEF123456-0123456789ABCDEF0123456789ABCDEF";
-    const connectionKeyHash = await argon2.hash(connectionKey, { type: argon2.argon2id });
+    const username = "ahmed";
+    const password = "Operator!2026";
+    const passwordHash = await argon2.hash(password);
     const user = {
       id: "user-1",
       username: "ahmed",
+      passwordHash,
       displayName: "Ahmed Ben Ali",
       role: "OPERATOR",
       isActive: true,
       tabletAccessEnabled: true,
-      connectionKeyId: "ABCDEF123456",
-      connectionKeyHash,
     };
     const transaction = {
       tabletAuthSession: { create: vi.fn() },
@@ -137,11 +133,10 @@ describe("OperatorAuthService authenticates the canonical User", () => {
     };
     const service = new OperatorAuthService(prisma as never as PrismaService, config() as never);
 
-    const result = await service.login({ connectionKey }, { ipAddress: "127.0.0.1" });
+    const result = await service.login({ username, password }, { ipAddress: "127.0.0.1" });
 
     expect(result.operator).toEqual({ id: user.id, displayName: user.displayName });
-    expect(result).not.toHaveProperty("connectionKeyHash");
-    expect(result.token).not.toBe(connectionKey);
+    expect(result.token).not.toBe(password);
     expect(transaction.tabletAuthSession.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -158,8 +153,9 @@ describe("OperatorAuthService authenticates the canonical User", () => {
   });
 
   it("uses the same generic credential error when the User is inactive", async () => {
-    const connectionKey = "NIM-ABCDEF123456-0123456789ABCDEF0123456789ABCDEF";
-    const connectionKeyHash = await argon2.hash(connectionKey, { type: argon2.argon2id });
+    const username = "ahmed";
+    const password = "Operator!2026";
+    const passwordHash = await argon2.hash(password);
     const prisma = {
       user: {
         findUnique: vi.fn().mockResolvedValue({
@@ -167,17 +163,16 @@ describe("OperatorAuthService authenticates the canonical User", () => {
           role: "OPERATOR",
           isActive: false,
           tabletAccessEnabled: false,
-          connectionKeyId: "ABCDEF123456",
-          connectionKeyHash,
+          passwordHash,
         }),
       },
       historyEvent: { create: vi.fn() },
     };
     const service = new OperatorAuthService(prisma as never as PrismaService, config() as never);
     await expect(
-      service.login({ connectionKey }, { ipAddress: "127.0.0.1" }),
+      service.login({ username, password }, { ipAddress: "127.0.0.1" }),
     ).rejects.toMatchObject({
-      response: { code: "INVALID_OPERATOR_KEY", message: expect.stringContaining("invalide") },
+      response: { code: "INVALID_OPERATOR_CREDENTIALS", message: expect.stringContaining("Identifiant") },
     });
   });
 });
