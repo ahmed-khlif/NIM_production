@@ -1,13 +1,14 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ColumnDef } from "@tanstack/react-table";
+import type { ProfileFamily } from "@nim/types";
 import {
   AlertTriangle,
   ArrowRight,
   BarChart3,
   CheckCircle2,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   ShieldCheck,
   Loader2,
@@ -16,12 +17,16 @@ import {
   Scissors,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { DataTable } from "@/components/ui/data-table";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Input } from "@/components/ui/input";
 import {
   ApiError,
@@ -35,58 +40,28 @@ import {
 } from "@/features/auth/auth-client";
 
 type Requirement = { profile: string; lengthMm: number; quantity: number };
-type RawLengthState = Record<string, string[]>;
-type PlanProposal = NonNullable<FaconnageOptimizationBatchResult["proposals"]>[number];
+const familyLabel: Record<ProfileFamily, string> = { IPE: "IPE", HEA: "HEA", UPN: "UPN", L: "L", ROND: "ROND", OTHER: "Autres profils" };
+type RawLengthRow = { length: string; quantity: string };
+type RawLengthState = Record<string, RawLengthRow[]>;
+const commonRawBarLengths = [6000, 12100, 15100];
+type MaterialProfileLengths = Record<string, { kgPerMeter: number; rawLengthsMm: number[] }>;
 
-function ProposalProfileGroup({
-  profile,
-  proposals,
-  selectedProposalIds,
-  onToggleProposal,
-  onToggleGroup,
-  disabled,
-}: {
-  profile: string;
-  proposals: PlanProposal[];
-  selectedProposalIds: string[];
-  onToggleProposal: (proposalId: string, checked: boolean) => void;
-  onToggleGroup: (proposalIds: string[], checked: boolean) => void;
-  disabled: boolean;
-}): React.ReactNode {
-  const [expanded, setExpanded] = useState(false);
-  const selectRef = useRef<HTMLInputElement>(null);
-  const selectedCount = proposals.filter((proposal) => selectedProposalIds.includes(proposal.id)).length;
-  const allSelected = proposals.length > 0 && selectedCount === proposals.length;
-  useEffect(() => {
-    if (selectRef.current) selectRef.current.indeterminate = selectedCount > 0 && !allSelected;
-  }, [selectedCount, allSelected]);
-
-  return (
-    <section className="border-b border-slate-100 last:border-b-0 dark:border-slate-800" data-testid={`proposal-profile-${profile}`}>
-      <div className="flex items-center gap-3 bg-slate-50/70 px-4 py-3 dark:bg-slate-900/50">
-        <button type="button" aria-expanded={expanded} aria-label={`${expanded ? "Masquer" : "Afficher"} les propositions ${profile}`} onClick={() => setExpanded((current) => !current)} className="flex min-h-10 min-w-0 flex-1 items-center gap-2 text-left font-semibold hover:text-nim-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600">
-          {expanded ? <ChevronDown aria-hidden="true" className="size-4 shrink-0" /> : <ChevronRight aria-hidden="true" className="size-4 shrink-0" />}
-          <span className="truncate">{profile}</span>
-          <Badge variant="outline">{proposals.length} barre(s)</Badge>
-        </button>
-        <span className="hidden text-xs text-slate-500 sm:inline">{selectedCount} sélectionnée(s)</span>
-        <input ref={selectRef} type="checkbox" checked={allSelected} disabled={disabled || proposals.length === 0} aria-label={`Sélectionner toutes les barres ${profile}`} onChange={(event) => onToggleGroup(proposals.map((proposal) => proposal.id), event.target.checked)} className="size-4 shrink-0 accent-red-600" />
-      </div>
-      {expanded ? <div className="divide-y divide-slate-100 dark:divide-slate-800">
-        {proposals.map((proposal) => {
-          const checked = selectedProposalIds.includes(proposal.id);
-          return <label key={proposal.id} className={`flex cursor-pointer items-start gap-3 px-4 py-3 sm:px-5 ${disabled ? "opacity-60" : "hover:bg-slate-50 dark:hover:bg-slate-900"}`}>
-            <input type="checkbox" className="mt-1 size-4 shrink-0 accent-red-600" checked={checked} disabled={disabled} aria-label={`Sélectionner ${proposal.reference}`} onChange={(event) => onToggleProposal(proposal.id, event.target.checked)} />
-            <span className="min-w-0 flex-1">
-              <span className="flex flex-wrap items-center gap-2 text-sm font-medium">{proposal.reference} · {formatMm(proposal.rawLengthMm)}<Badge variant="outline">À valider</Badge></span>
-              <span className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500"><span>Pièces : {proposal.cuts.map((cut) => `${cut.lengthMm} × ${cut.quantity}`).join(" · ")}</span><ArrowRight aria-hidden="true" className="size-3 text-nim-red" /><span>Barre {proposal.reference} ({formatMm(proposal.rawLengthMm)})</span><span>· chute {formatMm(proposal.wasteMm)}</span></span>
-            </span>
-          </label>;
-        })}
-      </div> : null}
-    </section>
-  );
+function catalogProfileKey(profile: string): string {
+  return profile.trim().replace(/\s+/g, "").toLocaleUpperCase();
 }
+
+function defaultRawLengthRows(
+  profile: string,
+  requirements: Array<{ lengthMm: number; quantity: number }>,
+  materialProfiles: MaterialProfileLengths,
+): RawLengthRow[] {
+  const configured = materialProfiles[catalogProfileKey(profile)]?.rawLengthsMm;
+  const lengths = configured?.length
+    ? configured
+    : commonRawBarLengths.filter((length) => length >= Math.max(...requirements.map((item) => item.lengthMm)));
+  return lengths.map((length) => ({ length: String(length), quantity: "" }));
+}
+type PlanProposal = NonNullable<FaconnageOptimizationBatchResult["proposals"]>[number];
 
 function formatMm(value: number): string {
   return `${value.toLocaleString("fr-FR")} mm`;
@@ -104,18 +79,36 @@ function mutationMessage(error: unknown): string {
     : "Impossible de calculer la mise en barres. Réessayez.";
 }
 
-function CuttingBar({ bar, index }: { bar: FaconnageCuttingBarPlan; index: number }): React.ReactNode {
+function CuttingBar({
+  bar,
+  index,
+  proposal,
+  checked,
+  disabled,
+  onToggle,
+}: {
+  bar: FaconnageCuttingBarPlan;
+  index: number;
+  proposal?: PlanProposal;
+  checked?: boolean;
+  disabled?: boolean;
+  onToggle?: (checked: boolean) => void;
+}): React.ReactNode {
   const fills = ["bg-red-700", "bg-red-600", "bg-red-500", "bg-red-400"];
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="text-sm font-semibold text-slate-950 dark:text-slate-100">Barre {index + 1}</p>
+        <div className="flex min-w-0 items-center gap-3">
+          {proposal ? <input type="checkbox" className="size-5 shrink-0 accent-red-600" checked={checked} disabled={disabled} aria-label={`Sélectionner ${proposal.reference}`} onChange={(event) => onToggle?.(event.target.checked)} /> : null}
+          <div>
+          <p className="text-sm font-semibold text-slate-950 dark:text-slate-100">{proposal?.reference ?? `Barre ${index + 1}`}</p>
           <p className="text-xs text-slate-500">Brut : {formatMm(bar.rawLengthMm)}</p>
+          </div>
         </div>
-        <Badge variant="outline" className="border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-          {bar.utilizationRate.toLocaleString("fr-FR")} %
-        </Badge>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {proposal ? <StatusBadge tone={proposal.status === "VALIDATED" ? "active" : "info"}>{proposal.status === "VALIDATED" ? "Créée" : "À créer"}</StatusBadge> : null}
+          <Badge variant="outline" className="border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">{bar.utilizationRate.toLocaleString("fr-FR")} %</Badge>
+        </div>
       </div>
 
       <div className="flex h-12 w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-900" aria-label={`Plan de coupe de la barre ${index + 1}`}>
@@ -164,52 +157,63 @@ function CuttingBar({ bar, index }: { bar: FaconnageCuttingBarPlan; index: numbe
 
 function AlternativeTable({ alternatives }: { alternatives: FaconnageCuttingPlanAlternative[] }): React.ReactNode {
   if (alternatives.length === 0) return null;
+  const columns: ColumnDef<FaconnageCuttingPlanAlternative>[] = [
+    {
+      id: "plan",
+      header: "Plan",
+      enableSorting: false,
+      cell: ({ row }) => `Alternative ${row.index + 1}`,
+    },
+    { accessorKey: "totalBars", header: "Barres" },
+    { accessorKey: "totalRawLengthMm", header: "Matière brute", cell: ({ getValue }) => formatMm(getValue<number>()) },
+    { accessorKey: "totalWasteMm", header: "Chute", cell: ({ getValue }) => formatMm(getValue<number>()) },
+    { accessorKey: "utilizationRate", header: "Rendement", cell: ({ getValue }) => `${getValue<number>().toLocaleString("fr-FR")} %` },
+  ];
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800">
       <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
         <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Alternatives calculées</p>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-left text-sm">
-          <thead className="border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-500 dark:border-slate-800">
-            <tr>
-              <th className="px-4 py-2.5">Plan</th>
-              <th className="px-4 py-2.5 text-right">Barres</th>
-              <th className="px-4 py-2.5 text-right">Matière brute</th>
-              <th className="px-4 py-2.5 text-right">Chute</th>
-              <th className="px-4 py-2.5 text-right">Rendement</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-            {alternatives.map((alternative, index) => (
-              <tr key={`${alternative.totalBars}-${alternative.totalWasteMm}-${index}`}>
-                <td className="px-4 py-3 font-medium text-slate-800 dark:text-slate-200">Alternative {index + 1}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{alternative.totalBars}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{formatMm(alternative.totalRawLengthMm)}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{formatMm(alternative.totalWasteMm)}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{alternative.utilizationRate.toLocaleString("fr-FR")} %</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable columns={columns} data={alternatives} caption="Alternatives de plans de coupe" getRowId={(row, index) => `${row.totalBars}-${row.totalWasteMm}-${index}`} />
     </div>
   );
 }
 
-function ProfileResult({ result }: { result: FaconnageProfileOptimizationResult }): React.ReactNode {
-  const [expanded, setExpanded] = useState(true);
+function ProfileResult({
+  result,
+  proposals,
+  selectedProposalIds,
+  disabled,
+  onToggleProposal,
+  onToggleGroup,
+}: {
+  result: FaconnageProfileOptimizationResult;
+  proposals: PlanProposal[];
+  selectedProposalIds: string[];
+  disabled: boolean;
+  onToggleProposal: (proposalId: string, checked: boolean) => void;
+  onToggleGroup: (proposalIds: string[], checked: boolean) => void;
+}): React.ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const selectRef = useRef<HTMLInputElement>(null);
+  const pendingProposals = proposals.filter((proposal) => proposal.status === "PROPOSED");
+  const selectedCount = pendingProposals.filter((proposal) => selectedProposalIds.includes(proposal.id)).length;
+  const allSelected = pendingProposals.length > 0 && selectedCount === pendingProposals.length;
+  useEffect(() => {
+    if (selectRef.current) selectRef.current.indeterminate = selectedCount > 0 && !allSelected;
+  }, [selectedCount, allSelected]);
   const detailsId = `profile-result-details-${result.profile.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
     <Card className="overflow-hidden border-slate-200 shadow-panel dark:border-slate-800">
       <CardHeader className="border-b border-slate-200 p-0 dark:border-slate-800">
+        <div className="flex items-center gap-3 px-4 sm:px-5">
         <button
           type="button"
           aria-expanded={expanded}
           aria-controls={detailsId}
           aria-label={`${expanded ? "Masquer" : "Afficher"} le détail de ${result.profile}`}
           onClick={() => setExpanded((current) => !current)}
-          className="flex min-h-20 w-full flex-wrap items-center justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-600 dark:hover:bg-slate-900"
+          className="flex min-h-20 min-w-0 flex-1 flex-wrap items-center justify-between gap-3 py-4 text-left transition-colors hover:text-nim-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-600"
         >
           <span className="flex min-w-0 items-center gap-3">
             {expanded ? <ChevronDown aria-hidden="true" className="size-4 shrink-0 text-slate-500" /> : <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-slate-500" />}
@@ -218,11 +222,16 @@ function ProfileResult({ result }: { result: FaconnageProfileOptimizationResult 
               <span className="mt-1 block text-sm text-slate-500">Plan recommandé · {result.totalBars} barre(s) · {result.utilizationRate.toLocaleString("fr-FR")} % rendement</span>
             </span>
           </span>
-          <Badge className="bg-red-50 text-nim-red hover:bg-red-50 dark:bg-red-950/30 dark:text-red-300">
+          <StatusBadge tone="active">
             <CheckCircle2 className="size-3" />
             {statusLabel(result.status)}
-          </Badge>
+          </StatusBadge>
         </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="hidden text-xs text-slate-500 sm:inline">{selectedCount}/{pendingProposals.length} sélectionnées</span>
+          <input ref={selectRef} type="checkbox" className="size-5 accent-red-600" checked={allSelected} disabled={disabled || pendingProposals.length === 0} aria-label={`Sélectionner toutes les barres ${result.profile}`} onChange={(event) => onToggleGroup(pendingProposals.map((proposal) => proposal.id), event.target.checked)} />
+        </div>
+        </div>
       </CardHeader>
       {expanded ? <CardContent id={detailsId} data-testid={detailsId} className="space-y-5 p-5">
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -240,25 +249,22 @@ function ProfileResult({ result }: { result: FaconnageProfileOptimizationResult 
           ))}
         </div>
 
-        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/50">
-          <div><p className="text-sm font-semibold">Correspondance besoins → barres recommandées</p><p className="text-xs text-slate-500">Chaque longueur demandée est reliée aux barres qui la produisent.</p></div>
-          {result.requirementSummary.map((need) => {
-            const matches = result.bars.flatMap((bar, index) => {
-              const cut = bar.cuts.find((item) => item.lengthMm === need.lengthMm);
-              return cut ? [{ index, quantity: cut.quantity }] : [];
-            });
-            return <div key={need.lengthMm} className="grid gap-2 rounded-lg border border-slate-200 bg-white p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1.2fr)] sm:items-center dark:border-slate-800 dark:bg-slate-950">
-              <span><strong>{formatMm(need.lengthMm)}</strong><span className="ml-2 text-xs text-slate-500">Demandé {need.requestedQuantity} · planifié {need.producedQuantity}</span></span>
-              <ArrowRight aria-hidden="true" className="hidden size-4 text-nim-red sm:block" />
-              <span className="flex flex-wrap gap-1.5">{matches.length ? matches.map((match) => <Badge key={match.index} variant="outline">Barre {match.index + 1} · {match.quantity}×</Badge>) : <span className="text-xs text-amber-700">Aucune barre correspondante</span>}</span>
-            </div>;
-          })}
-        </div>
-
-        <div className="space-y-3">
-          {result.bars.map((bar, index) => (
-            <CuttingBar key={`${bar.rawLengthMm}-${index}-${barSignatureForKey(bar)}`} bar={bar} index={index} />
-          ))}
+        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          {proposals.map((proposal, index) => <CuttingBar
+            key={proposal.id}
+            index={index}
+            proposal={proposal}
+            bar={{
+              rawLengthMm: proposal.rawLengthMm,
+              cuts: proposal.cuts,
+              usedLengthMm: proposal.usedLengthMm,
+              wasteMm: proposal.wasteMm,
+              utilizationRate: proposal.rawLengthMm > 0 ? (proposal.usedLengthMm / proposal.rawLengthMm) * 100 : 0,
+            }}
+            checked={proposal.status === "VALIDATED" || selectedProposalIds.includes(proposal.id)}
+            disabled={disabled || proposal.status !== "PROPOSED"}
+            onToggle={(checked) => onToggleProposal(proposal.id, checked)}
+          />)}
         </div>
 
         <AlternativeTable alternatives={result.alternatives} />
@@ -267,42 +273,33 @@ function ProfileResult({ result }: { result: FaconnageProfileOptimizationResult 
   );
 }
 
-function barSignatureForKey(bar: FaconnageCuttingBarPlan): string {
-  return bar.cuts.map((cut) => `${cut.lengthMm}-${cut.quantity}`).join("_");
-}
-
 export function FaconnageOptimizationResultView({
   offerId,
   optimization,
   onChange,
+  onEditConfiguration,
 }: {
   offerId: string;
   optimization: FaconnageOptimizationBatchResult;
   onChange?: (next: FaconnageOptimizationBatchResult) => void;
+  onEditConfiguration?: () => void;
 }): React.ReactNode {
   const queryClient = useQueryClient();
-  const [selectedProposalIds, setSelectedProposalIds] = useState<string[]>([]);
+  const [selectedProposalIds, setSelectedProposalIds] = useState<string[]>(() =>
+    (optimization.proposals ?? [])
+      .filter((proposal) => proposal.status === "PROPOSED")
+      .map((proposal) => proposal.id),
+  );
   const [proposalSearch, setProposalSearch] = useState("");
-  const [proposalPage, setProposalPage] = useState(1);
-  const [proposalPageSize, setProposalPageSize] = useState(20);
-  const [proposalsExpanded, setProposalsExpanded] = useState(false);
   const proposals = optimization.proposals ?? [];
   const remainingProposals = proposals.filter((proposal) => proposal.status === "PROPOSED");
-  const filteredProposals = remainingProposals.filter((proposal) =>
+  const filteredProposals = proposals.filter((proposal) =>
     `${proposal.reference} ${proposal.profile} ${proposal.rawLengthMm} ${proposal.cuts.map((cut) => cut.lengthMm).join(" ")}`
       .toLowerCase().includes(proposalSearch.trim().toLowerCase()),
   );
-  const proposalPages = Math.max(1, Math.ceil(filteredProposals.length / proposalPageSize));
-  const pageProposals = filteredProposals.slice((proposalPage - 1) * proposalPageSize, proposalPage * proposalPageSize);
-  const proposalGroups = [...pageProposals.reduce((groups, proposal) => {
-    const group = groups.get(proposal.profile) ?? [];
-    group.push(proposal);
-    groups.set(proposal.profile, group);
-    return groups;
-  }, new Map<string, PlanProposal[]>()).entries()].sort(([left], [right]) => left.localeCompare(right, "fr"));
-  useEffect(() => {
-    if (proposalPage > proposalPages) setProposalPage(proposalPages);
-  }, [proposalPage, proposalPages]);
+  const filteredPendingProposals = filteredProposals.filter((proposal) => proposal.status === "PROPOSED");
+  const allFilteredSelected = filteredPendingProposals.length > 0 &&
+    filteredPendingProposals.every((proposal) => selectedProposalIds.includes(proposal.id));
   const validateMutation = useMutation({
     mutationFn: ({ planId, proposalIds }: { planId: string; proposalIds: string[] }) =>
       validateCuttingPlanBarsRequest(offerId, planId, proposalIds),
@@ -317,9 +314,11 @@ export function FaconnageOptimizationResultView({
           ? { ...proposal, status: "VALIDATED" as const }
           : proposal),
       };
-      setSelectedProposalIds([]);
+      setSelectedProposalIds(proposals
+        .filter((proposal) => proposal.status === "PROPOSED" && !validatedIds.has(proposal.id))
+        .map((proposal) => proposal.id));
       onChange?.(next);
-      toast.success(`${response.plan.barsCreated} barre(s) validée(s). ${response.plan.remainingBarCount} restante(s).`);
+      toast.success(`${response.plan.barsCreated} barre(s) créée(s). ${response.plan.remainingBarCount} restante(s).`);
       void queryClient.invalidateQueries({ queryKey: ["offer", offerId] });
       void queryClient.invalidateQueries({ queryKey: ["offer", offerId, "cutting-plans"] });
       void queryClient.invalidateQueries({ queryKey: ["offer", offerId, "bars"] });
@@ -331,10 +330,12 @@ export function FaconnageOptimizationResultView({
 
   return (
     <div className="space-y-5" data-testid="faconnage-optimization-result">
-      <div aria-label="Étapes du façonnage" className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
-        <div className="mb-3 flex items-center justify-between text-xs text-slate-500"><span>Étape 3 sur 3</span><span>Vérifier les recommandations et valider les barres choisies</span></div>
-        <div role="progressbar" aria-label="Progression du façonnage" aria-valuemin={1} aria-valuemax={3} aria-valuenow={3} className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full w-full rounded-full bg-nim-red" /></div>
-        <div className="mt-3 grid grid-cols-3 gap-2 text-xs"><span className="text-emerald-700 dark:text-emerald-300">✓ Profils sélectionnés</span><span className="text-emerald-700 dark:text-emerald-300">✓ Optimisation calculée</span><span className="font-semibold text-nim-red">3 · Vérification et validation</span></div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+        <div>
+          <p className="text-sm font-semibold text-slate-950 dark:text-slate-100">Résultat de l’optimisation</p>
+          <p className="mt-0.5 text-xs text-slate-500">Les barres proposées sont sélectionnées par défaut. Décochez celles à exclure.</p>
+        </div>
+        {onEditConfiguration ? <Button type="button" variant="outline" size="sm" onClick={onEditConfiguration}>Modifier la configuration</Button> : null}
       </div>
       {optimization.plan ? (
         <Card className="border-slate-200 shadow-panel dark:border-slate-800">
@@ -342,31 +343,24 @@ export function FaconnageOptimizationResultView({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <p className="font-semibold text-slate-950 dark:text-slate-100">Plan {optimization.plan.reference}</p>
-                <Badge variant="outline">{optimization.plan.status === "VALIDATED" || optimization.plan.status === "APPROVED"
-                  ? "Validé"
+                <StatusBadge tone={optimization.plan.status === "VALIDATED" || optimization.plan.status === "APPROVED" ? "active" : optimization.plan.status === "PARTIALLY_VALIDATED" ? "info" : optimization.plan.status === "CANCELLED" ? "warning" : "neutral"}>{optimization.plan.status === "VALIDATED" || optimization.plan.status === "APPROVED"
+                  ? "Barres créées"
                   : optimization.plan.status === "PARTIALLY_VALIDATED"
-                    ? "Partiellement validé"
-                    : optimization.plan.status === "CANCELLED" ? "Annulé" : "Brouillon"}</Badge>
+                    ? "Création partielle"
+                    : optimization.plan.status === "CANCELLED" ? "Annulé" : "Brouillon"}</StatusBadge>
               </div>
               <p className="mt-1 text-sm text-slate-500">
                 {optimization.plan.status === "PARTIALLY_VALIDATED"
-                  ? `${proposals.length - remainingProposals.length} barre(s) validée(s) · ${remainingProposals.length} restante(s).`
+                  ? `${proposals.length - remainingProposals.length} barre(s) créée(s) · ${remainingProposals.length} restante(s).`
                   : "Choisissez les barres à matérialiser. Les autres pièces restent disponibles."}
               </p>
             </div>
             {(optimization.plan.status === "DRAFT" || optimization.plan.status === "PARTIALLY_VALIDATED") && remainingProposals.length > 0 ? (
-              <Button
-                type="button"
-                onClick={() => optimization.plan && validateMutation.mutate({ planId: optimization.plan.id, proposalIds: selectedProposalIds })}
-                disabled={validateMutation.isPending || selectedProposalIds.length === 0}
-              >
-                {validateMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
-                Valider les {selectedProposalIds.length} barre(s)
-              </Button>
+              <p className="text-sm font-medium text-slate-600 dark:text-slate-300">Sélectionnez les barres à créer dans la liste ci-dessous.</p>
             ) : optimization.plan.status === "VALIDATED" || optimization.plan.status === "APPROVED" ? (
               <div className="flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-300">
                 <CheckCircle2 className="size-4" />
-                Toutes les barres sont validées
+                Toutes les barres sont créées
               </div>
             ) : (
               <span className="text-sm text-slate-500">Plan archivé</span>
@@ -392,71 +386,116 @@ export function FaconnageOptimizationResultView({
         </CardContent>
       </Card>
 
-      {optimization.plan && remainingProposals.length > 0 ? (
-        <Card className="border-slate-200 shadow-panel dark:border-slate-800">
-          <button type="button" aria-expanded={proposalsExpanded} onClick={() => setProposalsExpanded((current) => !current)} className="flex min-h-16 w-full items-center gap-3 border-b border-slate-200 px-5 py-4 text-left font-semibold hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-600 dark:border-slate-800 dark:hover:bg-slate-900">
-            {proposalsExpanded ? <ChevronDown aria-hidden="true" className="size-4 shrink-0 text-slate-500" /> : <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-slate-500" />}
-            <span>Plan recommandé de mise en barres</span>
-            <span className="text-sm font-normal text-slate-500">{proposals.length} barre(s) · {remainingProposals.length} à valider</span>
-          </button>
-          {proposalsExpanded ? <>
-            <div className="flex flex-col gap-2 border-b border-slate-100 p-4 sm:flex-row dark:border-slate-800">
-              <div className="relative min-w-0 flex-1"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input type="search" value={proposalSearch} onChange={(event) => { setProposalSearch(event.target.value); setProposalPage(1); }} placeholder="Filtrer par référence, profil ou longueur…" aria-label="Rechercher dans les barres proposées" className="pl-9" /></div>
-              <Button type="button" variant="outline" size="sm" onClick={() => setSelectedProposalIds((current) => [...new Set([...current, ...filteredProposals.map((proposal) => proposal.id)])])} disabled={filteredProposals.length === 0 || validateMutation.isPending}>Tout sélectionner ({filteredProposals.length})</Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedProposalIds((current) => current.filter((id) => !filteredProposals.some((proposal) => proposal.id === id)))} disabled={!filteredProposals.some((proposal) => selectedProposalIds.includes(proposal.id))}>Désélectionner le filtre</Button>
+      {optimization.plan ? (
+        <Card className="overflow-hidden border-slate-200 shadow-panel dark:border-slate-800">
+          <CardHeader className="border-b border-slate-200 p-0 dark:border-slate-800">
+            <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <div>
+                <p className="font-semibold text-slate-950 dark:text-slate-100">Plan recommand&eacute; de mise en barres</p>
+                <p className="mt-1 text-sm text-slate-500">{remainingProposals.length} barre(s) restante(s) &middot; {selectedProposalIds.length} s&eacute;lectionn&eacute;e(s)</p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <div className="relative min-w-0 sm:w-72"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input type="search" value={proposalSearch} onChange={(event) => setProposalSearch(event.target.value)} placeholder="Rechercher une barre ou un profil&hellip;" aria-label="Rechercher dans les barres propos&#233;es" className="pl-9" /></div>
+                <Button type="button" variant="outline" size="sm" onClick={() => {
+                  const ids = new Set(filteredPendingProposals.map((proposal) => proposal.id));
+                  setSelectedProposalIds((current) => allFilteredSelected
+                    ? current.filter((id) => !ids.has(id))
+                    : [...new Set([...current, ...ids])]);
+                }} disabled={filteredPendingProposals.length === 0 || validateMutation.isPending}>
+                  {allFilteredSelected ? "Tout d\u00e9s\u00e9lectionner" : "Tout s\u00e9lectionner"}
+                </Button>
+              </div>
             </div>
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {proposalGroups.map(([profile, groupProposals]) => (
-                <ProposalProfileGroup
-                  key={profile}
-                  profile={profile}
-                  proposals={groupProposals}
-                  selectedProposalIds={selectedProposalIds}
-                  disabled={validateMutation.isPending}
-                  onToggleProposal={(proposalId, checked) => setSelectedProposalIds((current) => checked ? [...new Set([...current, proposalId])] : current.filter((id) => id !== proposalId))}
-                  onToggleGroup={(proposalIds, checked) => setSelectedProposalIds((current) => checked ? [...new Set([...current, ...proposalIds])] : current.filter((id) => !proposalIds.includes(id)))}
-                />
-              ))}
-              {filteredProposals.length === 0 ? <p className="p-5 text-sm text-slate-500">Aucune barre proposée ne correspond à cette recherche.</p> : null}
-            </div>
-            {filteredProposals.length > 0 ? <div className="flex flex-col gap-3 border-t border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
-              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>{(proposalPage - 1) * proposalPageSize + 1}–{Math.min(proposalPage * proposalPageSize, filteredProposals.length)} sur {filteredProposals.length} barres</span><label className="flex items-center gap-2">Par page<select aria-label="Barres par page" value={proposalPageSize} onChange={(event) => { setProposalPageSize(Number(event.target.value)); setProposalPage(1); }} className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option></select></label></div>
-              <div className="flex items-center gap-2"><Button type="button" variant="outline" size="sm" disabled={proposalPage <= 1} onClick={() => setProposalPage((current) => Math.max(1, current - 1))}><ChevronLeft className="size-4" />Précédent</Button><span aria-live="polite" className="min-w-16 text-center text-xs text-slate-500">{proposalPage} / {proposalPages}</span><Button type="button" variant="outline" size="sm" disabled={proposalPage >= proposalPages} onClick={() => setProposalPage((current) => Math.min(proposalPages, current + 1))}>Suivant<ChevronRight className="size-4" /></Button></div>
-            </div> : null}
-          </> : null}
+          </CardHeader>
+          <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            {optimization.profiles.map((result) => {
+              const profileProposals = filteredProposals.filter((proposal) => proposal.profile === result.profile);
+              if (profileProposals.length === 0) return null;
+              return <ProfileResult
+                key={result.profile}
+                result={result}
+                proposals={profileProposals}
+                selectedProposalIds={selectedProposalIds}
+                disabled={validateMutation.isPending}
+                onToggleProposal={(proposalId, checked) => setSelectedProposalIds((current) => checked ? [...new Set([...current, proposalId])] : current.filter((id) => id !== proposalId))}
+                onToggleGroup={(proposalIds, checked) => setSelectedProposalIds((current) => checked ? [...new Set([...current, ...proposalIds])] : current.filter((id) => !proposalIds.includes(id)))}
+              />;
+            })}
+            {filteredProposals.length === 0 ? <p className="p-5 text-sm text-slate-500">Aucune barre ne correspond &agrave; cette recherche.</p> : null}
+          </div>
         </Card>
       ) : null}
 
-      {optimization.profiles.map((result) => (
-        <ProfileResult key={result.profile} result={result} />
-      ))}
+      {optimization.plan && remainingProposals.length > 0 ? (
+        <div className="sticky bottom-0 z-30 -mx-4 flex flex-col gap-3 border-t border-slate-200 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-950/95">
+          <p className="text-sm text-slate-600 dark:text-slate-300" aria-live="polite">
+            <span className="font-semibold text-slate-950 dark:text-slate-100">{selectedProposalIds.length}</span> barre(s) sélectionnée(s) · {remainingProposals.length} restante(s)
+            {proposals.length - remainingProposals.length > 0 ? ` · ${proposals.length - remainingProposals.length} déjà créée(s)` : ""}
+          </p>
+          <Button
+            type="button"
+            onClick={() => optimization.plan && validateMutation.mutate({ planId: optimization.plan.id, proposalIds: selectedProposalIds })}
+            disabled={validateMutation.isPending || selectedProposalIds.length === 0}
+          >
+            {validateMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+            {validateMutation.isPending ? "Création en cours…" : `Créer ${selectedProposalIds.length} barre(s)`}
+          </Button>
+        </div>
+      ) : optimization.plan && (optimization.plan.status === "VALIDATED" || optimization.plan.status === "APPROVED") ? (
+        <div className="flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 sm:flex-row sm:items-center sm:justify-between dark:border-emerald-900 dark:bg-emerald-950/25">
+          <div className="flex items-center gap-2 text-sm font-medium text-emerald-800 dark:text-emerald-200"><CheckCircle2 className="size-5" />Toutes les barres sont créées et disponibles dans l’Affaire.</div>
+          <Button asChild><Link href={`/offers/${offerId}/bar-assignments`}>Continuer vers les affectations<ArrowRight className="size-4" /></Link></Button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?: string; requirements: Requirement[] }): React.ReactNode {
+export function FaconnageOptimizationPanel({ offerId, requirements, profileFamilies = {}, materialProfiles = {} }: { offerId?: string; requirements: Requirement[]; profileFamilies?: Record<string, ProfileFamily>; materialProfiles?: MaterialProfileLengths }): React.ReactNode {
   const groupedRequirements = useMemo(() => {
-    const grouped = new Map<string, Array<{ lengthMm: number; quantity: number }>>();
+    const grouped = new Map<string, Map<number, number>>();
     for (const requirement of requirements) {
-      const items = grouped.get(requirement.profile) ?? [];
-      items.push({ lengthMm: requirement.lengthMm, quantity: requirement.quantity });
+      const items = grouped.get(requirement.profile) ?? new Map<number, number>();
+      items.set(requirement.lengthMm, (items.get(requirement.lengthMm) ?? 0) + requirement.quantity);
       grouped.set(requirement.profile, items);
     }
     return [...grouped.entries()].map(([profile, items]) => ({
       profile,
-      requirements: items.sort((left, right) => right.lengthMm - left.lengthMm),
+      requirements: [...items].map(([lengthMm, quantity]) => ({ lengthMm, quantity })).sort((left, right) => right.lengthMm - left.lengthMm),
     }));
   }, [requirements]);
+  const profilesKey = groupedRequirements.map((group) => group.profile).join("|");
+  const [excludedProfiles, setExcludedProfiles] = useState<string[]>([]);
+  useEffect(() => setExcludedProfiles([]), [profilesKey]);
+  const activeRequirements = groupedRequirements.filter((group) => !excludedProfiles.includes(group.profile));
+  const [expandedProfile, setExpandedProfile] = useState<string | null>(
+    () => groupedRequirements[0]?.profile ?? null,
+  );
 
   const [rawLengths, setRawLengths] = useState<RawLengthState>(() =>
-    Object.fromEntries(groupedRequirements.map((group) => [group.profile, [""]])),
+    Object.fromEntries(activeRequirements.map((group) => [group.profile, defaultRawLengthRows(group.profile, group.requirements, materialProfiles)])),
   );
+  const activeProfilesKey = activeRequirements.map((group) => group.profile).join("|");
+  useEffect(() => {
+    const names = activeProfilesKey ? activeProfilesKey.split("|") : [];
+    setExpandedProfile((current) => (current && names.includes(current) ? current : names[0] ?? null));
+  }, [activeProfilesKey]);
+  useEffect(() => {
+    setRawLengths((current) => Object.fromEntries(activeRequirements.map((group) => [group.profile, current[group.profile] ?? defaultRawLengthRows(group.profile, group.requirements, materialProfiles)])));
+  }, [activeProfilesKey, materialProfiles]);
   const [optimization, setOptimization] = useState<FaconnageOptimizationBatchResult | null>(null);
   const [clientError, setClientError] = useState<string | null>(null);
+  const pieceBasedSuggestions = Object.fromEntries(activeRequirements.map((group) => {
+    const alreadyConfigured = new Set((rawLengths[group.profile] ?? []).map((row) => Number(row.length)).filter(Boolean));
+    const suggestions = [...new Set(group.requirements.map((item) => Math.ceil((item.lengthMm + 100) / 500) * 500))]
+      .filter((length) => !alreadyConfigured.has(length))
+      .sort((left, right) => left - right);
+    return [group.profile, suggestions];
+  }));
 
   const optimizeMutation = useMutation({
     mutationFn: (input: FaconnageOptimizationRequest) => {
-      if (!offerId) throw new Error("Cette optimisation doit être lancée depuis une offre.");
+      if (!offerId) throw new Error("Cette optimisation doit être lancée depuis une affaire.");
       return optimizeFaconnageRequest(offerId, input);
     },
     onSuccess: (response) => {
@@ -465,24 +504,38 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
     },
   });
 
-  const updateRawLength = (profile: string, index: number, value: string): void => {
+  const updateRawLength = (profile: string, index: number, field: keyof RawLengthRow, value: string): void => {
     setOptimization(null);
     setRawLengths((current) => ({
       ...current,
-      [profile]: current[profile].map((item, itemIndex) => (itemIndex === index ? value.replace(/[^0-9]/g, "") : item)),
+      [profile]: (current[profile] ?? [{ length: "", quantity: "" }]).map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value.replace(/[^0-9]/g, "") } : item)),
     }));
   };
 
   const addRawLength = (profile: string): void => {
     setOptimization(null);
-    setRawLengths((current) => ({ ...current, [profile]: [...current[profile], ""] }));
+    setRawLengths((current) => ({ ...current, [profile]: [...(current[profile] ?? [{ length: "", quantity: "" }]), { length: "", quantity: "" }] }));
+  };
+
+  const addSuggestedRawLength = (profile: string, lengthMm: number): void => {
+    setOptimization(null);
+    setClientError(null);
+    setRawLengths((current) => {
+      const rows = current[profile] ?? [{ length: "", quantity: "" }];
+      if (rows.some((row) => Number(row.length) === lengthMm)) return current;
+      const emptyIndex = rows.findIndex((row) => !row.length.trim());
+      const next = [...rows];
+      if (emptyIndex >= 0) next[emptyIndex] = { length: String(lengthMm), quantity: "" };
+      else next.push({ length: String(lengthMm), quantity: "" });
+      return { ...current, [profile]: next };
+    });
   };
 
   const removeRawLength = (profile: string, index: number): void => {
     setOptimization(null);
     setRawLengths((current) => {
-      const next = current[profile].filter((_, itemIndex) => itemIndex !== index);
-      return { ...current, [profile]: next.length > 0 ? next : [""] };
+      const next = (current[profile] ?? [{ length: "", quantity: "" }]).filter((_, itemIndex) => itemIndex !== index);
+      return { ...current, [profile]: next.length > 0 ? next : [{ length: "", quantity: "" }] };
     });
   };
 
@@ -490,26 +543,33 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
     setOptimization(null);
     setClientError(null);
     optimizeMutation.reset();
-    setRawLengths(Object.fromEntries(groupedRequirements.map((group) => [group.profile, [""]])));
+    setRawLengths(Object.fromEntries(activeRequirements.map((group) => [group.profile, defaultRawLengthRows(group.profile, group.requirements, materialProfiles)])));
   };
 
   const submit = (): void => {
     const profiles: FaconnageOptimizationRequest["profiles"] = [];
-    for (const group of groupedRequirements) {
-      const values = [...new Set((rawLengths[group.profile] ?? []).map(Number).filter((value) => Number.isInteger(value) && value > 0))].sort((a, b) => a - b);
+    if (activeRequirements.length === 0) {
+      setClientError("Conservez au moins un profil à optimiser.");
+      return;
+    }
+    for (const group of activeRequirements) {
+      const values = (rawLengths[group.profile] ?? []).map((row) => ({
+        lengthMm: Number(row.length),
+        quantity: row.quantity === "" ? undefined : Number(row.quantity),
+      })).filter((row) => Number.isInteger(row.lengthMm) && row.lengthMm > 0 && (row.quantity === undefined || (Number.isInteger(row.quantity) && row.quantity >= 0)));
       if (values.length === 0) {
         setClientError(`Ajoutez au moins une longueur de matière brute pour ${group.profile}.`);
         return;
       }
       const longestPiece = Math.max(...group.requirements.map((item) => item.lengthMm));
-      if (Math.max(...values) < longestPiece) {
+      if (Math.max(...values.map((row) => row.lengthMm)) < longestPiece) {
         setClientError(`Pour ${group.profile}, aucune longueur brute ne peut contenir la pièce de ${formatMm(longestPiece)}.`);
         return;
       }
       profiles.push({
         profile: group.profile,
         requirements: group.requirements,
-        rawLengths: values.map((lengthMm) => ({ lengthMm })),
+        rawLengths: values,
       });
     }
     setClientError(null);
@@ -520,6 +580,7 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
 
   return (
     <div className="space-y-5" data-testid="faconnage-optimization-panel">
+      {!optimization ? <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-nim-red">
@@ -527,7 +588,8 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
             Mise en barres
           </div>
           <h2 className="mt-1 text-xl font-semibold text-slate-950 dark:text-slate-100">Configurer les longueurs brutes</h2>
-          <p className="mt-1 text-sm text-slate-500">Saisissez les longueurs de matière brute possibles pour chaque profil sélectionné.</p>
+          <p className="mt-1 text-xs text-slate-500">Chaque profil garde ses propres longueurs. Les boutons proposent aussi des formats calculés depuis les pièces sélectionnées ; vérifiez qu’ils correspondent à une barre réellement disponible avant de les ajouter.</p>
+          <p className="mt-1 text-sm text-slate-500">Les profils viennent des pièces sélectionnées. La quantité disponible est facultative et limite ce calcul seulement, sans réserver le stock.</p>
         </div>
         <Button variant="outline" size="sm" onClick={reset} disabled={optimizeMutation.isPending}>
           <RotateCcw className="size-4" />
@@ -537,7 +599,7 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
 
       {!offerId ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-300">
-          Ouvrez une offre avant de lancer une optimisation de façonnage.
+          Ouvrez une affaire avant de lancer une optimisation de façonnage.
         </div>
       ) : null}
 
@@ -548,19 +610,32 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
         </div>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        {groupedRequirements.map((group) => (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-900/50">
+        <span className="text-slate-600 dark:text-slate-300">Profils inclus dans ce calcul · {activeRequirements.length} / {groupedRequirements.length}</span>
+        {excludedProfiles.length ? <div className="flex flex-wrap gap-1.5">{excludedProfiles.map((profile) => <Button key={profile} type="button" variant="outline" size="sm" onClick={() => setExcludedProfiles((current) => current.filter((item) => item !== profile))}>+ {profile}</Button>)}</div> : null}
+      </div>
+      {activeRequirements.length === 0 ? <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-300">Ajoutez de nouveau un profil depuis l’étape de sélection avant de lancer le calcul.</div> : null}
+      <div className="grid gap-4" data-testid="faconnage-raw-length-profile-list">
+        {activeRequirements.map((group) => {
+          const isExpanded = expandedProfile === group.profile;
+          const configuredLengths = (rawLengths[group.profile] ?? []).map((row) => row.length).filter(Boolean);
+          return (
           <Card key={group.profile} className="border-slate-200 shadow-panel dark:border-slate-800">
             <CardHeader className="border-b border-slate-200 dark:border-slate-800">
               <div className="flex items-center justify-between gap-3">
-                <div>
-                  <CardTitle className="text-base">{group.profile}</CardTitle>
-                  <p className="mt-1 text-xs text-slate-500">{group.requirements.reduce((sum, item) => sum + item.quantity, 0)} pièce(s) à produire</p>
+                <button type="button" aria-expanded={isExpanded} aria-label={`${isExpanded ? "Masquer" : "Configurer"} les longueurs ${group.profile}`} onClick={() => setExpandedProfile((current) => current === group.profile ? null : group.profile)} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nim-red">
+                  {isExpanded ? <ChevronDown className="size-4 shrink-0 text-slate-500" /> : <ChevronRight className="size-4 shrink-0 text-slate-500" />}
+                  <span className="min-w-0"><span className="flex flex-wrap items-center gap-2"><span className="text-base font-semibold text-slate-900 dark:text-slate-100">{group.profile}</span><Badge variant="outline">Famille · {familyLabel[profileFamilies[group.profile] ?? "OTHER"]}</Badge></span><span className="mt-1 block truncate text-xs text-slate-500">{group.requirements.reduce((sum, item) => sum + item.quantity, 0)} pièce(s) à produire · {configuredLengths.length ? `${configuredLengths.join(" · ")} mm configuré(s)` : "longueurs à configurer"}</span></span>
+                </button>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{group.requirements.length} longueur(s)</Badge>
+                  <Button type="button" variant="ghost" size="icon" disabled={activeRequirements.length <= 1 || optimizeMutation.isPending} onClick={() => { setOptimization(null); setExcludedProfiles((current) => [...current, group.profile]); }} aria-label={`Retirer le profil ${group.profile} de ce calcul`}>
+                    <X className="size-4" />
+                  </Button>
                 </div>
-                <Badge variant="outline">{group.requirements.length} longueur(s)</Badge>
               </div>
             </CardHeader>
-            <CardContent className="space-y-5 p-5">
+            {isExpanded ? <CardContent className="space-y-5 p-5">
               <div>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Besoins</p>
                 <div className="flex flex-wrap gap-2">
@@ -581,29 +656,42 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
                   </Button>
                 </div>
                 <div className="space-y-2">
-                  {(rawLengths[group.profile] ?? [""]).map((value, index) => (
-                    <div key={`${group.profile}-${index}`} className="flex items-center gap-2">
-                      <div className="relative flex-1">
+                  {(rawLengths[group.profile] ?? [{ length: "", quantity: "" }]).map((row, index) => (
+                    <div key={`${group.profile}-${index}`} className="grid grid-cols-[minmax(0,1fr)_minmax(100px,0.55fr)_40px] items-center gap-2">
+                      <div className="relative">
                         <Input
                           inputMode="numeric"
-                          value={value}
-                          onChange={(event) => updateRawLength(group.profile, index, event.target.value)}
+                          value={row.length}
+                          onChange={(event) => updateRawLength(group.profile, index, "length", event.target.value)}
                           placeholder="Longueur"
                           aria-label={`Longueur brute ${index + 1} pour ${group.profile}`}
                           className="pr-12"
                         />
                         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">mm</span>
                       </div>
+                      <Input inputMode="numeric" value={row.quantity} onChange={(event) => updateRawLength(group.profile, index, "quantity", event.target.value)} placeholder="Illimité" aria-label={`Quantité brute ${index + 1} pour ${group.profile} (facultative)`} />
                       <Button type="button" variant="ghost" size="icon" onClick={() => removeRawLength(group.profile, index)} aria-label={`Supprimer la longueur ${index + 1} de ${group.profile}`}>
                         <Trash2 className="size-4" />
                       </Button>
                     </div>
                   ))}
                 </div>
+                <details className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 p-3 dark:border-slate-700 dark:bg-slate-900/50">
+                  <summary className="cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-200">Suggestions calculées depuis les pièces · {(pieceBasedSuggestions[group.profile] ?? []).length}</summary>
+                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">Longueur de pièce + marge de 100 mm, arrondie au 500 mm supérieur. Vérifiez que la matière est réellement disponible.</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(pieceBasedSuggestions[group.profile] ?? []).length ? (pieceBasedSuggestions[group.profile] ?? []).map((length) => (
+                      <Button key={length} type="button" variant="outline" size="sm" className="h-9 border-slate-200 bg-white hover:border-red-200 hover:bg-red-50 hover:text-nim-red dark:border-slate-700 dark:bg-slate-950 dark:hover:border-red-900 dark:hover:bg-red-950/30" onClick={() => addSuggestedRawLength(group.profile, length)}>
+                        <Plus className="size-3.5" />{formatMm(length)}
+                      </Button>
+                    )) : <span className="text-xs text-slate-400">Toutes les suggestions calculées sont déjà dans cette liste.</span>}
+                  </div>
+                </details>
               </div>
-            </CardContent>
+            </CardContent> : null}
           </Card>
-        ))}
+          );
+        })}
       </div>
 
       <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-panel sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-950">
@@ -611,17 +699,19 @@ export function FaconnageOptimizationPanel({ offerId, requirements }: { offerId?
           <BarChart3 className="size-4 text-nim-red" />
           L’optimiseur compare les longueurs brutes saisies et peut les combiner dans le même plan.
         </div>
-        <Button onClick={submit} disabled={optimizeMutation.isPending || !offerId}>
+        <Button onClick={submit} disabled={optimizeMutation.isPending || !offerId || activeRequirements.length === 0}>
           {optimizeMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <Scissors className="size-4" />}
           {optimizeMutation.isPending ? "Optimisation en cours..." : "Optimiser la mise en barres"}
         </Button>
       </div>
+      </> : null}
 
       {optimization && offerId ? (
         <FaconnageOptimizationResultView
           offerId={offerId}
           optimization={optimization}
           onChange={setOptimization}
+          onEditConfiguration={() => setOptimization(null)}
         />
       ) : null}
     </div>

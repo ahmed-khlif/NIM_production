@@ -1,16 +1,16 @@
 "use client";
 
-import type { ManagedUser, TabletConnectionKeyResult, UserRole } from "@nim/types";
+import { Table } from "@/components/ui/table";
+import type { ManagedUser, UserRole } from "@nim/types";
 import { createUserSchema, resetUserPasswordSchema, updateUserSchema } from "@nim/validation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Copy,
   Eye,
   EyeOff,
   Filter,
-  KeyRound,
   Loader2,
   Pencil,
+  Power,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -34,22 +34,22 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
+import { RoleBadge, roleLabels } from "@/components/ui/role-badge";
 import {
   Select,
   SelectContent,
@@ -62,32 +62,30 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import {
   ApiError,
   createUserRequest,
-  getUsersRequest,
-  resetUserTabletKeyRequest,
+  getUsersPageRequest,
+  endUserMachineSessionRequest,
   resetUserPasswordRequest,
   setUserTabletAccessRequest,
   setUserActiveRequest,
   updateUserRequest,
 } from "@/features/auth/auth-client";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 import { useAuth } from "@/features/auth/auth-provider";
 
 const roleOptions: Array<{ value: UserRole; label: string; description: string }> = [
-  { value: "ADMIN", label: "Administrateur", description: "Utilisateurs, sécurité et paramètres" },
+  { value: "ADMIN", label: roleLabels.ADMIN, description: "Utilisateurs, sécurité et paramètres" },
   {
     value: "PRODUCTION_MANAGER",
-    label: "Responsable production",
+    label: roleLabels.PRODUCTION_MANAGER,
     description: "Pièces, affectations et pilotage",
   },
-  { value: "OPERATOR", label: "Opérateur", description: "Opérations et suivi de fabrication" },
+  { value: "OPERATOR", label: roleLabels.OPERATOR, description: "Opérations et suivi de fabrication" },
   {
     value: "QUALITY_CONTROLLER",
-    label: "Contrôleur qualité",
+    label: roleLabels.QUALITY_CONTROLLER,
     description: "Contrôles et validations qualité",
   },
 ];
-const roleLabels = Object.fromEntries(
-  roleOptions.map((role) => [role.value, role.label]),
-) as Record<UserRole, string>;
 type UserForm = { username: string; displayName: string; role: UserRole; password: string };
 type StatusFilter = "all" | "active" | "inactive";
 const emptyForm: UserForm = { username: "", displayName: "", role: "OPERATOR", password: "" };
@@ -108,22 +106,17 @@ function formatDate(value: string | null): string {
     year: "numeric",
   }).format(new Date(value));
 }
+function formatDateTime(value: string): string {
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
 
 function TabletKeyActions({ item }: { item: ManagedUser }): React.ReactNode {
   const queryClient = useQueryClient();
-  const [keyResult, setKeyResult] = useState<TabletConnectionKeyResult | null>(null);
-  const keyMutation = useMutation({
-    mutationFn: () => resetUserTabletKeyRequest(item.id),
-    onSuccess: async (result) => {
-      setKeyResult(result);
-      await queryClient.invalidateQueries({ queryKey: ["users"] });
-      toast.success("Clé tablette créée. Copiez-la maintenant : elle ne sera plus affichée.");
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof ApiError ? error.message : "Impossible de créer la clé tablette.",
-      ),
-  });
   const accessMutation = useMutation({
     mutationFn: (active: boolean) => setUserTabletAccessRequest(item.id, active),
     onSuccess: async (_, active) => {
@@ -139,97 +132,29 @@ function TabletKeyActions({ item }: { item: ManagedUser }): React.ReactNode {
   return (
     <>
       <div className="flex items-center justify-end gap-1">
-        {item.hasConnectionKey ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            disabled={!item.isActive || accessMutation.isPending}
-            aria-label={
-              item.tabletAccessEnabled
-                ? `Désactiver l’accès tablette de ${item.displayName}`
-                : `Activer l’accès tablette de ${item.displayName}`
-            }
-            title={
-              item.tabletAccessEnabled ? "Désactiver l’accès tablette" : "Activer l’accès tablette"
-            }
-            onClick={() => accessMutation.mutate(!item.tabletAccessEnabled)}
-          >
-            {accessMutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : item.tabletAccessEnabled ? (
-              <ShieldOff className="size-4 text-amber-600" />
-            ) : (
-              <ShieldCheck className="size-4 text-emerald-600" />
-            )}
-          </Button>
-        ) : null}
         <Button
           type="button"
           variant="ghost"
           size="icon"
-          disabled={!item.isActive || keyMutation.isPending}
-          aria-label={`${item.hasConnectionKey ? "Renouveler" : "Créer"} la clé tablette de ${item.displayName}`}
-          title={item.hasConnectionKey ? "Renouveler la clé tablette" : "Créer une clé tablette"}
-          onClick={() => keyMutation.mutate()}
+          disabled={!item.isActive || accessMutation.isPending}
+          aria-label={item.tabletAccessEnabled ? `Désactiver l’accès tablette de ${item.displayName}` : `Activer l’accès tablette de ${item.displayName}`}
+          title={item.tabletAccessEnabled ? "Désactiver l’accès tablette" : "Activer l’accès tablette"}
+          onClick={() => accessMutation.mutate(!item.tabletAccessEnabled)}
         >
-          {keyMutation.isPending ? (
+          {accessMutation.isPending ? (
             <Loader2 className="size-4 animate-spin" />
+          ) : item.tabletAccessEnabled ? (
+            <ShieldOff className="size-4 text-amber-600" />
           ) : (
-            <KeyRound className="size-4 text-nim-red" />
+            <ShieldCheck className="size-4 text-emerald-600" />
           )}
         </Button>
       </div>
-      <Dialog
-        open={Boolean(keyResult)}
-        onOpenChange={(open) => {
-          if (!open) setKeyResult(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Clé tablette prête</DialogTitle>
-            <DialogDescription>
-              Pour {keyResult?.user.displayName}. Cette clé est affichée une seule fois ;
-              transmettez-la à l’opérateur de manière sécurisée.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex gap-2">
-            <Input
-              aria-label="Clé de connexion tablette"
-              readOnly
-              value={keyResult?.connectionKey ?? ""}
-              className="font-mono text-sm"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                if (keyResult)
-                  void navigator.clipboard
-                    .writeText(keyResult.connectionKey)
-                    .then(() => toast.success("Clé copiée"))
-                    .catch(() =>
-                      toast.error("Copie impossible ; sélectionnez la clé manuellement."),
-                    );
-              }}
-            >
-              <Copy className="size-4" />
-              Copier
-            </Button>
-          </div>
-          <DialogFooter>
-            <Button type="button" onClick={() => setKeyResult(null)}>
-              J’ai copié la clé
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }
 
-function UserFormDialog({
+function UserFormSheet({
   open,
   onOpenChange,
   editing,
@@ -266,23 +191,23 @@ function UserFormDialog({
   const setField = <K extends keyof UserForm>(field: K, value: UserForm[K]): void =>
     setForm({ ...form, [field]: value });
   return (
-    <Dialog
+    <Sheet
       open={open}
       onOpenChange={(nextOpen) => {
         if (!nextOpen && busy) return;
         onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[520px]">
-        <DialogHeader>
-          <DialogTitle>{editing ? "Modifier l’utilisateur" : "Créer un utilisateur"}</DialogTitle>
-          <DialogDescription>
+      <SheetContent side="right" className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[520px] dark:border-slate-800 dark:bg-slate-950">
+        <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+          <SheetTitle>{editing ? "Modifier l’utilisateur" : "Créer un utilisateur"}</SheetTitle>
+          <SheetDescription>
             {editing
               ? "Mettez à jour son identité ou son niveau d’accès."
               : "Créez un compte interne avec un rôle précis et un mot de passe initial."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="user-username">Identifiant</Label>
@@ -362,7 +287,7 @@ function UserFormDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
           <Button
             type="button"
             variant="outline"
@@ -381,50 +306,65 @@ function UserFormDialog({
             )}
             {editing ? "Enregistrer" : "Créer l’utilisateur"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 export function UsersView(): React.ReactNode {
+  const { params: urlParams, update: updateUrl } = useListQueryState();
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const isAdmin = user?.role === "ADMIN";
   const canManageDirectory = isAdmin || user?.role === "PRODUCTION_MANAGER";
-  const [roleFilter, setRoleFilter] = useState<UserRole | "all">("all");
+  const [roleFilter, setRoleFilter] = useState<UserRole | "all">(() => {
+    const role = getInitialListParam("role", "all");
+    return roleOptions.some((option) => option.value === role) ? role as UserRole : "all";
+  });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ManagedUser | null>(null);
   const [form, setForm] = useState<UserForm>(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [statusTarget, setStatusTarget] = useState<ManagedUser | null>(null);
+  const [sessionTarget, setSessionTarget] = useState<ManagedUser | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(() => {
+    const status = getInitialListParam("status", "all");
+    return ["all", "active", "inactive"].includes(status) ? status as StatusFilter : "all";
+  });
+  const [page, setPage] = useState(() => Math.max(1, Number(getInitialListParam("page", "1")) || 1));
+  const [pageSize, setPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("pageSize", "20"))) ? Number(getInitialListParam("pageSize", "20")) : 20);
+  const [sorting, setSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "displayName", sortDirection: "asc" });
   useEffect(() => {
-    const requestedRole = new URLSearchParams(window.location.search).get("role");
-    if (requestedRole && roleOptions.some((role) => role.value === requestedRole)) {
-      setRoleFilter(requestedRole as UserRole);
-    }
-  }, []);
+    setSearch(urlParams.get("search") ?? "");
+    const requestedRole = urlParams.get("role") ?? "all";
+    setRoleFilter(roleOptions.some((role) => role.value === requestedRole) ? requestedRole as UserRole : "all");
+    const status = urlParams.get("status") ?? "all";
+    setStatusFilter(["all", "active", "inactive"].includes(status) ? status as StatusFilter : "all");
+    setPage(Math.max(1, Number(urlParams.get("page")) || 1));
+    const nextSize = Number(urlParams.get("pageSize"));
+    if ([10, 20, 50].includes(nextSize)) setPageSize(nextSize);
+  }, [urlParams]);
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
     return () => window.clearTimeout(timer);
   }, [search]);
   const usersQuery = useQuery({
-    queryKey: ["users", page, pageSize, debouncedSearch, roleFilter, statusFilter],
-    queryFn: () => getUsersRequest({
+    queryKey: ["users", page, pageSize, debouncedSearch, roleFilter, statusFilter, sorting],
+    queryFn: () => getUsersPageRequest({
       page,
       pageSize,
       search: debouncedSearch,
       role: roleFilter,
       active: statusFilter === "all" ? undefined : statusFilter === "active",
+      ...sorting,
     }),
     enabled: Boolean(canManageDirectory),
     retry: false,
+    refetchInterval: isAdmin ? 15_000 : false,
   });
   const saveMutation = useMutation({
     mutationFn: async ({ target, values }: { target: ManagedUser | null; values: UserForm }) => {
@@ -464,6 +404,20 @@ export function UsersView(): React.ReactNode {
       toast.error(message);
     },
   });
+  const endMachineSessionMutation = useMutation({
+    mutationFn: (id: string) => endUserMachineSessionRequest(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["users"] });
+      await queryClient.invalidateQueries({ queryKey: ["tablet"] });
+      setSessionTarget(null);
+      toast.success("Session machine terminée");
+    },
+    onError: (error) => {
+      const message = error instanceof ApiError ? error.message : "Impossible de terminer la session machine.";
+      toast.error(message);
+      void usersQuery.refetch();
+    },
+  });
   const users = usersQuery.data?.users ?? [];
   const pagination = usersQuery.data?.pagination ?? { page, pageSize, total: users.length, totalPages: 1 };
   const pageCount = pagination.totalPages;
@@ -476,6 +430,9 @@ export function UsersView(): React.ReactNode {
   useEffect(() => {
     setPage(1);
   }, [pageSize, roleFilter, debouncedSearch, statusFilter]);
+  useEffect(() => {
+    updateUrl({ search: search.trim(), role: roleFilter === "all" ? null : roleFilter, status: statusFilter === "all" ? null : statusFilter, page, pageSize });
+  }, [search, roleFilter, statusFilter, page, pageSize, updateUrl]);
 
   const resetFilters = (): void => {
     setSearch("");
@@ -599,7 +556,7 @@ export function UsersView(): React.ReactNode {
         </Card>
       </div>
       <Card>
-        <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <CardHeader className="nim-sticky-table-tools gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle className="text-sm">Répertoire des utilisateurs</CardTitle>
             <p className="mt-1 text-xs text-slate-500">
@@ -723,10 +680,17 @@ export function UsersView(): React.ReactNode {
                 className="border-b border-slate-100 px-5 py-3 text-xs text-slate-500"
                 aria-live="polite"
               >
-                {pagination.total.toLocaleString("fr-FR")} utilisateur(s) correspondent aux filtres
+                {pagination.total.toLocaleString("fr-FR")} {pagination.total === 1 ? "utilisateur correspond" : "utilisateurs correspondent"} aux filtres
               </p>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table
+                  serverSorting={{ column: ({ displayName: "Utilisateur", role: "Rôle", isActive: "Statut", lastLoginAt: "Dernière connexion" } as const)[sorting.sortBy as "displayName" | "role" | "isActive" | "lastLoginAt"], direction: sorting.sortDirection }}
+                  onServerSort={(column, direction) => {
+                    const field = ({ Utilisateur: "displayName", Rôle: "role", Statut: "isActive", "Dernière connexion": "lastLoginAt" } as const)[column as "Utilisateur" | "Rôle" | "Statut" | "Dernière connexion"];
+                    if (field) { setSorting({ sortBy: field, sortDirection: direction }); setPage(1); }
+                  }}
+                  className="nim-data-table w-full text-left text-sm"
+                >
                   <caption className="sr-only">Répertoire des utilisateurs</caption>
                   <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                     <tr>
@@ -734,7 +698,8 @@ export function UsersView(): React.ReactNode {
                       <th className="px-5 py-3 font-medium">Rôle</th>
                       <th className="px-5 py-3 font-medium">Statut</th>
                       <th className="px-5 py-3 font-medium">Dernière connexion</th>
-                      <th className="px-5 py-3 text-right font-medium">Actions</th>
+                      {isAdmin ? <th className="px-5 py-3 font-medium" data-sortable="false">Session machine</th> : null}
+                      <th className="px-5 py-3 text-right font-medium" data-sortable="false">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -754,9 +719,7 @@ export function UsersView(): React.ReactNode {
                           </div>
                         </td>
                         <td className="px-5 py-4">
-                          <Badge variant="outline" className="font-medium">
-                            {roleLabels[item.role]}
-                          </Badge>
+                          <RoleBadge role={item.role} />
                         </td>
                         <td className="px-5 py-4">
                           <StatusBadge tone={item.isActive ? "active" : "neutral"}>
@@ -766,6 +729,35 @@ export function UsersView(): React.ReactNode {
                         <td className="px-5 py-4 text-xs text-slate-500">
                           {formatDate(item.lastLoginAt)}
                         </td>
+                        {isAdmin ? (
+                          <td className="px-5 py-4">
+                            {item.activeMachineSession ? (
+                              <div className="space-y-1.5">
+                                <StatusBadge tone="warning">Session active</StatusBadge>
+                                <p className="text-xs font-medium text-slate-700">{item.activeMachineSession.machineName}</p>
+                                <p className="text-xs text-slate-500">Depuis {formatDateTime(item.activeMachineSession.startedAt)}</p>
+                                {item.activeMachineSession.runningBarReference ? (
+                                  <p className="text-xs font-medium text-amber-700">
+                                    Fabrication en cours · {item.activeMachineSession.runningBarReference}
+                                  </p>
+                                ) : (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="mt-1"
+                                    onClick={() => setSessionTarget(item)}
+                                  >
+                                    <Power className="size-3.5" />
+                                    Terminer la session
+                                  </Button>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">Aucune session machine</span>
+                            )}
+                          </td>
+                        ) : null}
                         <td className="px-5 py-4">
                           <div className="flex justify-end gap-1">
                             {isAdmin ? (
@@ -805,7 +797,7 @@ export function UsersView(): React.ReactNode {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
                 {pagedUsers.map((item) => (
@@ -827,9 +819,7 @@ export function UsersView(): React.ReactNode {
                       </StatusBadge>
                     </div>
                     <div className="mt-3 flex items-center justify-between gap-3">
-                      <Badge variant="outline" className="font-medium">
-                        {roleLabels[item.role]}
-                      </Badge>
+                      <RoleBadge role={item.role} />
                       <div className="flex gap-1">
                         {isAdmin ? (
                           <>
@@ -865,6 +855,29 @@ export function UsersView(): React.ReactNode {
                         {item.role === "OPERATOR" ? <TabletKeyActions item={item} /> : null}
                       </div>
                     </div>
+                    {isAdmin && item.role === "OPERATOR" ? (
+                      <div className="mt-3 border-t border-slate-100 pt-3">
+                        {item.activeMachineSession ? (
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="space-y-1">
+                              <StatusBadge tone="warning">Session · {item.activeMachineSession.machineName}</StatusBadge>
+                              <p className="text-xs text-slate-500">Depuis {formatDateTime(item.activeMachineSession.startedAt)}</p>
+                              {item.activeMachineSession.runningBarReference ? (
+                                <p className="text-xs font-medium text-amber-700">Fabrication en cours · {item.activeMachineSession.runningBarReference}</p>
+                              ) : null}
+                            </div>
+                            {!item.activeMachineSession.runningBarReference ? (
+                              <Button type="button" variant="outline" size="sm" onClick={() => setSessionTarget(item)}>
+                                <Power className="size-4" />
+                                Terminer la session
+                              </Button>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400">Aucune session machine active</p>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -881,7 +894,7 @@ export function UsersView(): React.ReactNode {
           )}
         </CardContent>
       </Card>
-      <UserFormDialog
+      <UserFormSheet
         open={dialogOpen}
         onOpenChange={(open) => {
           setDialogOpen(open);
@@ -931,6 +944,39 @@ export function UsersView(): React.ReactNode {
                 <UserCheck className="size-4" />
               )}
               {statusTarget?.isActive ? "Désactiver" : "Réactiver"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={Boolean(sessionTarget)}
+        onOpenChange={(open) => {
+          if (!open && !endMachineSessionMutation.isPending) setSessionTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Terminer cette session machine ?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {sessionTarget?.activeMachineSession
+                ? `${sessionTarget.displayName} sera retiré de la session sur ${sessionTarget.activeMachineSession.machineName}. L’historique de la session sera conservé. Cette action ne déconnecte pas son compte NIM.`
+                : "Cette session n’est plus active. Actualisez la liste des utilisateurs."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={endMachineSessionMutation.isPending}>Annuler</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                endMachineSessionMutation.isPending ||
+                !sessionTarget?.activeMachineSession ||
+                Boolean(sessionTarget.activeMachineSession.runningBarReference)
+              }
+              onClick={() => {
+                if (sessionTarget) endMachineSessionMutation.mutate(sessionTarget.id);
+              }}
+            >
+              {endMachineSessionMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <Power className="size-4" />}
+              Terminer la session
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -46,13 +46,16 @@ export function Pagination({
   const tokens = pageTokens(safePage, safePageCount);
 
   return (
-    <div className="flex flex-col gap-3 border-t border-slate-200 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+    <nav
+      aria-label="Navigation dans les pages"
+      className="flex flex-col gap-3 border-t border-slate-200 bg-card px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between dark:border-slate-800"
+    >
       <p className="text-xs text-slate-500" aria-live="polite">
         {start}–{end} sur {total} {itemLabel}{plural}
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))}>
-          <SelectTrigger className="h-8 w-[112px] text-xs" aria-label="Nombre de lignes par page">
+          <SelectTrigger className="h-11 min-h-11 w-[120px] text-sm" aria-label="Nombre de lignes par page">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -67,7 +70,7 @@ export function Pagination({
           type="button"
           variant="outline"
           size="icon"
-          className="size-8"
+          className="size-11"
           onClick={() => onPageChange(Math.max(1, safePage - 1))}
           disabled={safePage <= 1}
           aria-label="Page précédente"
@@ -82,7 +85,7 @@ export function Pagination({
                 type="button"
                 variant={token === safePage ? "secondary" : "ghost"}
                 size="icon"
-                className="size-8 text-xs"
+                className="size-11 text-xs"
                 onClick={() => onPageChange(token)}
                 aria-label={`Page ${token}`}
                 aria-current={token === safePage ? "page" : undefined}
@@ -90,7 +93,7 @@ export function Pagination({
                 {token}
               </Button>
             ) : (
-              <span key={token} className="flex size-8 items-center justify-center text-slate-400" aria-hidden="true">
+              <span key={token} className="flex size-11 items-center justify-center text-slate-400" aria-hidden="true">
                 <MoreHorizontal className="size-4" />
               </span>
             ),
@@ -103,7 +106,7 @@ export function Pagination({
           type="button"
           variant="outline"
           size="icon"
-          className="size-8"
+          className="size-11"
           onClick={() => onPageChange(Math.min(safePageCount, safePage + 1))}
           disabled={safePage >= safePageCount}
           aria-label="Page suivante"
@@ -111,6 +114,6 @@ export function Pagination({
           <ChevronRight className="size-4" />
         </Button>
       </div>
-    </div>
+    </nav>
   );
 }

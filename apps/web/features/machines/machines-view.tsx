@@ -1,17 +1,20 @@
 "use client";
 
+import { Table } from "@/components/ui/table";
 import type { ManagedMachine, MachineStatus } from "@nim/types";
 import { createMachineSchema, updateMachineSchema } from "@nim/validation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Factory,
   Filter,
+  AlertTriangle,
   Loader2,
   MapPin,
   Pencil,
   RefreshCw,
   Search,
   Settings2,
+  Trash2,
   Wrench,
   X,
 } from "lucide-react";
@@ -28,17 +31,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
+import { CategoryBadge } from "@/components/ui/category-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -56,10 +59,12 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import {
   ApiError,
   createMachineRequest,
+  deleteMachineRequest,
   getMachinesPageRequest,
   setMachineStatusRequest,
   updateMachineRequest,
 } from "@/features/auth/auth-client";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 import { useAuth } from "@/features/auth/auth-provider";
 
 const statusLabels: Record<MachineStatus, string> = {
@@ -92,7 +97,7 @@ const emptyForm: MachineForm = {
   location: "",
 };
 
-function MachineDialog({
+function MachineFormSheet({
   open,
   onOpenChange,
   editing,
@@ -129,17 +134,20 @@ function MachineDialog({
   const setField = <K extends keyof MachineForm>(field: K, value: MachineForm[K]): void =>
     setForm({ ...form, [field]: value });
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[560px]">
-        <DialogHeader>
-          <DialogTitle>{editing ? "Modifier la machine" : "Ajouter une machine"}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[560px] dark:border-slate-800 dark:bg-slate-950"
+      >
+        <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+          <SheetTitle>{editing ? "Modifier la machine" : "Ajouter une machine"}</SheetTitle>
+          <SheetDescription>
             {editing
               ? "Mettez à jour les informations de cette machine."
               : "Enregistrez une machine pour la rendre disponible dans le suivi de production."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="machine-name">Nom</Label>
@@ -197,6 +205,20 @@ function MachineDialog({
                 <SelectItem value="INACTIVE">Inactive</SelectItem>
               </SelectContent>
             </Select>
+            {editing?.status !== "MAINTENANCE" && form.status === "MAINTENANCE" ? (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm font-medium text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100"
+              >
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                <span>
+                  Cette machine ne pourra plus recevoir d’affectation ni démarrer de fabrication.
+                  {editing?.assignedBarCount
+                    ? ` ${editing.assignedBarCount} barre(s) lui sont encore affectée(s) : retirez-les depuis l’onglet Barres de chaque affaire.`
+                    : " Vérifiez qu’aucune barre ne reste affectée avant de confirmer."}
+                </span>
+              </div>
+            ) : null}
           </div>
           <div className="space-y-2">
             <Label htmlFor="machine-description">Description (optionnelle)</Label>
@@ -213,7 +235,7 @@ function MachineDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
           <Button
             type="button"
             variant="outline"
@@ -232,13 +254,14 @@ function MachineDialog({
             )}
             {editing ? "Enregistrer" : "Ajouter la machine"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 export function MachinesView(): React.ReactNode {
+  const { params: urlParams, update: updateUrl } = useListQueryState();
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const canManage = user?.role === "ADMIN" || user?.role === "PRODUCTION_MANAGER";
@@ -247,18 +270,53 @@ export function MachinesView(): React.ReactNode {
   const [form, setForm] = useState<MachineForm>(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [statusTarget, setStatusTarget] = useState<ManagedMachine | null>(null);
-  const [search, setSearch] = useState("");
+  const [maintenanceNotice, setMaintenanceNotice] = useState<{ machineName: string; assignedBarCount: number } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ManagedMachine | null>(null);
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<MachineStatusFilter>("ALL");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [statusFilter, setStatusFilter] = useState<MachineStatusFilter>(() => {
+    const status = getInitialListParam("status", "ALL");
+    return ["ALL", "ACTIVE", "MAINTENANCE", "INACTIVE"].includes(status)
+      ? (status as MachineStatusFilter)
+      : "ALL";
+  });
+  const [page, setPage] = useState(() =>
+    Math.max(1, Number(getInitialListParam("page", "1")) || 1),
+  );
+  const [pageSize, setPageSize] = useState(() =>
+    [10, 20, 50].includes(Number(getInitialListParam("pageSize", "20")))
+      ? Number(getInitialListParam("pageSize", "20"))
+      : 20,
+  );
+  const [sorting, setSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "status", sortDirection: "asc" });
+  useEffect(() => {
+    setSearch(urlParams.get("search") ?? "");
+    const status = urlParams.get("status") ?? "ALL";
+    setStatusFilter(
+      ["ALL", "ACTIVE", "MAINTENANCE", "INACTIVE"].includes(status)
+        ? (status as MachineStatusFilter)
+        : "ALL",
+    );
+    setPage(Math.max(1, Number(urlParams.get("page")) || 1));
+    const nextSize = Number(urlParams.get("pageSize"));
+    if ([10, 20, 50].includes(nextSize)) setPageSize(nextSize);
+  }, [urlParams]);
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
     return () => window.clearTimeout(timer);
   }, [search]);
+  useEffect(() => {
+    updateUrl({
+      search: search.trim(),
+      status: statusFilter === "ALL" ? null : statusFilter,
+      page,
+      pageSize,
+    });
+  }, [search, statusFilter, page, pageSize, updateUrl]);
   const machinesQuery = useQuery({
-    queryKey: ["machines", page, pageSize, debouncedSearch, statusFilter],
-    queryFn: () => getMachinesPageRequest({ page, pageSize, search: debouncedSearch, status: statusFilter }),
+    queryKey: ["machines", page, pageSize, debouncedSearch, statusFilter, sorting],
+    queryFn: () =>
+      getMachinesPageRequest({ page, pageSize, search: debouncedSearch, status: statusFilter, ...sorting }),
     retry: false,
   });
   const saveMutation = useMutation({
@@ -279,10 +337,31 @@ export function MachinesView(): React.ReactNode {
       if (values.status !== target.status) await setMachineStatusRequest(target.id, values.status);
       return updated;
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["machines"] });
+    onSuccess: async (_, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["machines"] }),
+        ...(variables.target
+          ? [
+              queryClient.invalidateQueries({ queryKey: ["machine", variables.target.id] }),
+              queryClient.invalidateQueries({
+                queryKey: ["history", "machine", variables.target.id],
+              }),
+            ]
+          : []),
+        queryClient.invalidateQueries({ queryKey: ["assignments"] }),
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+        queryClient.invalidateQueries({ queryKey: ["offer"] }),
+      ]);
       setDialogOpen(false);
-      toast.success(editing ? "Machine mise à jour" : "Machine ajoutée");
+      if (variables.values.status === "MAINTENANCE" && variables.target?.status !== "MAINTENANCE") {
+        setMaintenanceNotice({
+          machineName: variables.target?.name ?? variables.values.name,
+          assignedBarCount: variables.target?.assignedBarCount ?? 0,
+        });
+      } else {
+        toast.success(variables.target ? "Machine mise à jour" : "Machine ajoutée");
+      }
     },
     onError: (error) =>
       setFormError(
@@ -293,15 +372,54 @@ export function MachinesView(): React.ReactNode {
     mutationFn: ({ id, status }: { id: string; status: MachineStatus }) =>
       setMachineStatusRequest(id, status),
     onSuccess: async (_, variables) => {
-      await queryClient.invalidateQueries({ queryKey: ["machines"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["machines"] }),
+        queryClient.invalidateQueries({ queryKey: ["machine", variables.id] }),
+        queryClient.invalidateQueries({ queryKey: ["history", "machine", variables.id] }),
+        queryClient.invalidateQueries({ queryKey: ["assignments"] }),
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+        queryClient.invalidateQueries({ queryKey: ["offer"] }),
+      ]);
       setStatusTarget(null);
-      toast.success(`Machine ${statusLabels[variables.status].toLowerCase()}`);
+      if (variables.status === "MAINTENANCE") {
+        const machine = machines.find((item) => item.id === variables.id);
+        setMaintenanceNotice({
+          machineName: machine?.name ?? "La machine",
+          assignedBarCount: machine?.assignedBarCount ?? 0,
+        });
+      } else {
+        toast.success(`Machine ${statusLabels[variables.status].toLowerCase()}`);
+      }
     },
     onError: (error) =>
       toast.error(error instanceof ApiError ? error.message : "Impossible de modifier le statut."),
   });
+  const deleteMutation = useMutation({
+    mutationFn: (machineId: string) => deleteMachineRequest(machineId),
+    onSuccess: async ({ machine }) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["machines"] }),
+        queryClient.invalidateQueries({ queryKey: ["machine", machine.id] }),
+        queryClient.invalidateQueries({ queryKey: ["assignments"] }),
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+      ]);
+      setDeleteTarget(null);
+      toast.success(`Machine ${machine.internalNumber} supprimée.`);
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof ApiError ? error.message : "Impossible de supprimer cette machine.",
+      ),
+  });
   const machines = machinesQuery.data?.machines ?? [];
-  const pagination = machinesQuery.data?.pagination ?? { page, pageSize, total: machines.length, totalPages: 1 };
+  const pagination = machinesQuery.data?.pagination ?? {
+    page,
+    pageSize,
+    total: machines.length,
+    totalPages: 1,
+  };
   const pageCount = pagination.totalPages;
   const currentPage = pagination.page;
   const pagedMachines = machines;
@@ -415,7 +533,7 @@ export function MachinesView(): React.ReactNode {
         </Card>
       </div>
       <Card>
-        <CardHeader className="gap-4">
+        <CardHeader className="nim-sticky-table-tools gap-4">
           <div>
             <CardTitle className="text-sm">Parc machines</CardTitle>
             <p className="mt-1 text-xs text-slate-500">
@@ -423,34 +541,34 @@ export function MachinesView(): React.ReactNode {
               étape.
             </p>
           </div>
-          <div className="relative w-full sm:max-w-xs">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Rechercher une machine"
-              aria-label="Rechercher une machine"
-              className="pl-9 pr-9"
-            />
-            {search ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute right-1 top-1/2 size-8 -translate-y-1/2 text-slate-400"
-                onClick={() => setSearch("")}
-                aria-label="Effacer la recherche"
-              >
-                <X className="size-4" />
-              </Button>
-            ) : null}
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="grid w-full min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_240px]">
+            <div className="relative min-w-0">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Rechercher une machine"
+                aria-label="Rechercher une machine"
+                className="w-full pl-9 pr-9"
+              />
+              {search ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="absolute right-1 top-1/2 size-8 -translate-y-1/2 text-slate-400"
+                  onClick={() => setSearch("")}
+                  aria-label="Effacer la recherche"
+                >
+                  <X className="size-4" />
+                </Button>
+              ) : null}
+            </div>
             <Select
               value={statusFilter}
               onValueChange={(value) => setStatusFilter(value as MachineStatusFilter)}
             >
-              <SelectTrigger className="w-full sm:w-48" aria-label="Filtrer par statut machine">
+              <SelectTrigger className="w-full" aria-label="Filtrer par statut machine">
                 <Filter className="size-4 text-slate-400" />
                 <SelectValue placeholder="Tous les statuts" />
               </SelectTrigger>
@@ -466,7 +584,8 @@ export function MachinesView(): React.ReactNode {
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3 text-xs text-slate-500">
             <span>
-              {pagination.total.toLocaleString("fr-FR")} machine(s) correspondent aux filtres
+              {pagination.total.toLocaleString("fr-FR")}{" "}
+              {pagination.total === 1 ? "machine correspond" : "machines correspondent"} aux filtres
             </span>
             {hasFilters ? (
               <Button
@@ -529,16 +648,25 @@ export function MachinesView(): React.ReactNode {
           ) : (
             <>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table
+                  serverSorting={{ column: ({ name: "Machine", type: "Type", location: "Emplacement", status: "Statut" } as const)[sorting.sortBy as "name" | "type" | "location" | "status"], direction: sorting.sortDirection }}
+                  onServerSort={(column, direction) => {
+                    const field = ({ Machine: "name", Type: "type", Emplacement: "location", Statut: "status" } as const)[column as "Machine" | "Type" | "Emplacement" | "Statut"];
+                    if (field) { setSorting({ sortBy: field, sortDirection: direction }); setPage(1); }
+                  }}
+                  className="nim-data-table w-full text-left text-sm"
+                >
                   <caption className="sr-only">Parc des machines de production</caption>
                   <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                     <tr>
                       <th className="px-5 py-3 font-medium">Machine</th>
                       <th className="px-5 py-3 font-medium">Type</th>
                       <th className="px-5 py-3 font-medium">Emplacement</th>
-                      <th className="px-5 py-3 font-medium">Barres associées</th>
+                      <th className="px-5 py-3 font-medium" data-sortable="false">Barres associées</th>
                       <th className="px-5 py-3 font-medium">Statut</th>
-                      <th className="px-5 py-3 text-right font-medium">Actions</th>
+                      <th className="px-5 py-3 text-right font-medium" data-sortable="false">
+                        Actions
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -558,7 +686,7 @@ export function MachinesView(): React.ReactNode {
                           </div>
                         </td>
                         <td className="px-5 py-4">
-                          <Badge variant="outline">{item.type}</Badge>
+                          <CategoryBadge tone="blue">{item.type}</CategoryBadge>
                         </td>
                         <td className="px-5 py-4 text-sm text-slate-500">
                           {item.location ? (
@@ -606,6 +734,16 @@ export function MachinesView(): React.ReactNode {
                                     <Wrench className="size-4 text-amber-600" />
                                   )}
                                 </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Supprimer ${item.name}`}
+                                  title="Supprimer la machine"
+                                  onClick={() => setDeleteTarget(item)}
+                                  disabled={deleteMutation.isPending}
+                                >
+                                  <Trash2 className="size-4 text-red-600" />
+                                </Button>
                               </>
                             ) : null}
                           </div>
@@ -613,7 +751,7 @@ export function MachinesView(): React.ReactNode {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
                 {pagedMachines.map((item) => (
@@ -653,6 +791,16 @@ export function MachinesView(): React.ReactNode {
                           )}
                           {item.status !== "ACTIVE" ? "Réactiver" : "Maintenance"}
                         </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-700 hover:bg-red-50 hover:text-red-800"
+                          onClick={() => setDeleteTarget(item)}
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="size-4" />
+                          Supprimer
+                        </Button>
                       </div>
                     ) : null}
                   </div>
@@ -665,13 +813,16 @@ export function MachinesView(): React.ReactNode {
                 total={pagination.total}
                 itemLabel="machine"
                 onPageChange={setPage}
-                onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+                onPageSizeChange={(size) => {
+                  setPageSize(size);
+                  setPage(1);
+                }}
               />
             </>
           )}
         </CardContent>
       </Card>
-      <MachineDialog
+      <MachineFormSheet
         open={dialogOpen}
         onOpenChange={(open) => {
           setDialogOpen(open);
@@ -704,6 +855,21 @@ export function MachinesView(): React.ReactNode {
                   : `${statusTarget.name} ne pourra plus recevoir d’affectation pendant sa maintenance.`
                 : ""}
             </AlertDialogDescription>
+            {statusTarget?.status === "ACTIVE" ? (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm font-medium text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100"
+              >
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                <span>
+                  Une machine est mise en maintenance : veuillez retirer les barres qui lui sont
+                  affectées.
+                  {(statusTarget.assignedBarCount ?? 0) > 0
+                    ? ` ${statusTarget.assignedBarCount} barre(s) actuellement affectée(s).`
+                    : ""}
+                </span>
+              </div>
+            ) : null}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={statusMutation.isPending}>Annuler</AlertDialogCancel>
@@ -726,6 +892,78 @@ export function MachinesView(): React.ReactNode {
               )}
               {statusTarget?.status !== "ACTIVE" ? "Réactiver" : "Mettre en maintenance"}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deleteMutation.isPending) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Supprimer cette machine ?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget
+                ? `${deleteTarget.name} (${deleteTarget.internalNumber}) sera supprimée définitivement si elle n’a aucun lien de production.`
+                : ""}{" "}
+              Les machines avec des affectations ou un historique doivent être désactivées pour les
+              retirer des prochaines affectations.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Annuler</AlertDialogCancel>
+                  <AlertDialogAction
+              className="bg-red-700 text-white hover:bg-red-800"
+              disabled={deleteMutation.isPending}
+              onClick={() => {
+                if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+              }}
+            >
+              {deleteMutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              {deleteMutation.isPending ? "Suppression…" : "Supprimer la machine"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+<AlertDialog
+        open={Boolean(maintenanceNotice)}
+        onOpenChange={(open) => {
+          if (!open) setMaintenanceNotice(null);
+        }}
+      >
+        <AlertDialogContent className="border-red-300 dark:border-red-900">
+          <AlertDialogHeader>
+            <div className="mb-2 flex size-11 items-center justify-center rounded-full bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300">
+              <AlertTriangle className="size-6" aria-hidden="true" />
+            </div>
+            <AlertDialogTitle className="text-red-800 dark:text-red-200">
+              Attention : machine en maintenance
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="block font-semibold text-slate-900 dark:text-slate-100">
+                {maintenanceNotice?.machineName}
+              </span>
+              {maintenanceNotice?.assignedBarCount ? (
+                <span className="mt-2 block rounded-lg border border-red-200 bg-red-50 p-3 font-medium text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+                  {maintenanceNotice.assignedBarCount} barre(s) lui sont encore affectées. Retirez
+                  ces affectations depuis Affaire → Barres → Retirer.
+                </span>
+              ) : (
+                <span className="mt-2 block">
+                  Aucune barre affectée n’a été détectée. La machine ne peut recevoir aucune nouvelle
+                  affectation ni démarrer de fabrication tant qu’elle est en maintenance.
+                </span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction className="bg-red-700 text-white hover:bg-red-800">Compris</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

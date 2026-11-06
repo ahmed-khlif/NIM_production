@@ -1,7 +1,9 @@
 import type { UserRole } from "@nim/types";
 import {
+  Activity,
   BriefcaseBusiness,
   CalendarRange,
+  ContactRound,
   Factory,
   History,
   LayoutDashboard,
@@ -29,9 +31,16 @@ export const navigationItems: NavigationItem[] = [
     section: "main",
   },
   {
-    label: "Offres",
+    label: "Affaires",
     href: "/offers",
     icon: BriefcaseBusiness,
+    roles: ["ADMIN", "PRODUCTION_MANAGER"],
+    section: "main",
+  },
+  {
+    label: "Clients",
+    href: "/clients",
+    icon: ContactRound,
     roles: ["ADMIN", "PRODUCTION_MANAGER"],
     section: "main",
   },
@@ -46,6 +55,13 @@ export const navigationItems: NavigationItem[] = [
     label: "Machines",
     href: "/machines",
     icon: Factory,
+    roles: ["ADMIN", "PRODUCTION_MANAGER"],
+    section: "main",
+  },
+  {
+    label: "Production",
+    href: "/production",
+    icon: Activity,
     roles: ["ADMIN", "PRODUCTION_MANAGER"],
     section: "main",
   },

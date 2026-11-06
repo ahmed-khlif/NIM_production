@@ -1,12 +1,11 @@
 "use client";
 
-import type { ManagedHistoryEvent } from "@nim/types";
+import { Table } from "@/components/ui/table";
+import { historyEntityTypes, historyEventTypes, type ManagedHistoryEvent } from "@nim/types";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   CalendarClock,
-  ChevronLeft,
-  ChevronRight,
   Database,
   History as HistoryIcon,
   RefreshCw,
@@ -15,10 +14,9 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/features/auth/auth-provider";
 import { ApiError, getHistoryRequest, getOfferHistoryRequest } from "@/features/auth/auth-client";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -34,55 +32,73 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { eventLabel } from "./event-labels";
+import { CategoryBadge, type CategoryTone } from "@/components/ui/category-badge";
+import { RoleBadge } from "@/components/ui/role-badge";
+import { Pagination } from "@/components/ui/pagination";
+import { entityLabel, eventLabel } from "./event-labels";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 
 const dateFormatter = new Intl.DateTimeFormat("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+const eventOptions = historyEventTypes;
+const entityOptions = historyEntityTypes;
 
-const entityLabels: Record<string, string> = {
-  AUTH: "Authentification",
-  USER: "Utilisateur",
-  MACHINE: "Machine",
-  PIECE: "Pièce",
-  ASSIGNMENT: "Affectation",
-  PRODUCTION_OPERATION: "Production",
-  QUALITY_CONTROL: "Qualité",
-  OFFER: "Offre",
-  CUTTING_PLAN: "Plan de coupe",
-};
-
-const eventOptions = [
-  "AUTH_LOGIN",
-  "AUTH_LOGIN_FAILED",
-  "USER_CREATED",
-  "USER_DISABLED",
-  "MACHINE_STATUS_CHANGED",
-  "PIECE_CREATED",
-  "PIECE_UPDATED",
-  "ASSIGNMENT_CREATED",
-  "ASSIGNMENT_REASSIGNED",
-  "ASSIGNMENT_UNASSIGNED",
-  "PRODUCTION_STARTED",
-  "PRODUCTION_COMPLETED",
-  "QUALITY_VALIDATED",
-  "QUALITY_REJECTED",
-];
-
-const entityOptions = [
-  "AUTH",
-  "USER",
-  "MACHINE",
-  "PIECE",
-  "ASSIGNMENT",
-  "PRODUCTION_OPERATION",
-  "QUALITY_CONTROL",
-];
+const pageSizes = [10, 20, 50] as const;
 
 function formatDate(value: string): string {
   return dateFormatter.format(new Date(value));
 }
 
-function entityLabel(value: string): string {
-  return entityLabels[value] ?? value;
+const entityBadgeTones: Record<string, CategoryTone> = {
+  CLIENT: "teal",
+  AUTH: "violet",
+  USER: "violet",
+  MACHINE: "blue",
+  MACHINE_SESSION: "blue",
+  PIECE: "cyan",
+  PIECE_UNIT: "cyan",
+  ASSIGNMENT: "indigo",
+  CUTTING_PLAN: "indigo",
+  CUTTING_BAR: "indigo",
+  PRODUCTION_OPERATION: "amber",
+  PRODUCTION_RUN: "amber",
+  QUALITY_CONTROL: "rose",
+  NON_CONFORMITY: "rose",
+  OFFER: "teal",
+  FACONNAGE_PREPARATION: "teal",
+  IMPORT_BATCH: "slate",
+  MATERIAL_PROFILE: "slate",
+};
+
+function HistoryEntityBadge({ entityType }: { entityType: ManagedHistoryEvent["entityType"] }): React.ReactNode {
+  return <CategoryBadge tone={entityBadgeTones[entityType] ?? "slate"}>{entityLabel(entityType)}</CategoryBadge>;
+}
+
+function HistoryActorRole({ role }: { role: ManagedHistoryEvent["actorRole"] }): React.ReactNode {
+  return role ? <RoleBadge role={role} className="min-h-5 px-2 py-0.5 text-[10px] [&_svg]:size-3" /> : <StatusBadge tone="neutral">Système</StatusBadge>;
+}
+
+function businessStatus(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const labels: Record<string, string> = {
+    PENDING: "En attente",
+    FACONNEE: "Façonnée",
+    AFFECTEE: "Affectée",
+    ASSIGNED: "Affectée",
+    LANCEE: "Lancée",
+    IN_PROGRESS: "En cours",
+    FABRIQUEE: "Fabriquée",
+    COMPLETED: "Terminée",
+    NON_CONFORME: "Non conforme",
+    REJECTED: "Rejetée",
+    DRAFT: "Brouillon",
+    READY: "Prête",
+    IN_PRODUCTION: "En production",
+    CANCELLED: "Annulée",
+    ARCHIVED: "Archivée",
+    ACTIVE: "Actif",
+    INACTIVE: "Inactif",
+  };
+  return labels[value] ?? value.replaceAll("_", " ");
 }
 
 function metadataSummary(metadata: ManagedHistoryEvent["metadata"]): string | null {
@@ -90,18 +106,44 @@ function metadataSummary(metadata: ManagedHistoryEvent["metadata"]): string | nu
   const oldStatus = metadata.oldStatus ?? metadata.oldUnitStatus ?? metadata.oldPieceStatus;
   const newStatus = metadata.newStatus ?? metadata.newUnitStatus ?? metadata.newPieceStatus;
   if (typeof oldStatus === "string" && typeof newStatus === "string")
-    return `${oldStatus} → ${newStatus}`;
+    return `${businessStatus(oldStatus)} → ${businessStatus(newStatus)}`;
   if (typeof metadata.result === "string")
     return metadata.result === "CONFORM" ? "Résultat conforme" : "Résultat non conforme";
   if (typeof metadata.internalNumber === "string") return metadata.internalNumber;
+  if (typeof metadata.reference === "string") return metadata.reference;
+  if (typeof metadata.offerReference === "string") return `Affaire ${metadata.offerReference}`;
+  const preparation = metadata.summary;
+  if (preparation && typeof preparation === "object" && !Array.isArray(preparation)) {
+    const summary = preparation as Record<string, unknown>;
+    const profiles = typeof summary.selectedProfileCount === "number" ? `${summary.selectedProfileCount} profils` : null;
+    const units = typeof summary.totalQuantity === "number" ? `${summary.totalQuantity} unités` : null;
+    const pieces = typeof summary.pieceRows === "number" ? `${summary.pieceRows} repères` : null;
+    return [profiles, pieces, units].filter(Boolean).join(" · ") || null;
+  }
+  if (Array.isArray(metadata.selectedProfiles) && metadata.selectedProfiles.every((profile) => typeof profile === "string")) {
+    return `Profils : ${metadata.selectedProfiles.slice(0, 4).join(", ")}${metadata.selectedProfiles.length > 4 ? "…" : ""}`;
+  }
+  return null;
+}
+
+function entityReference(event: ManagedHistoryEvent): string | null {
+  const metadata = event.metadata;
+  if (!metadata) return null;
+  for (const key of ["reference", "internalNumber", "offerReference", "barReference", "pieceReference", "machineReference"]) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
   return null;
 }
 
 function traceabilityLinks(event: ManagedHistoryEvent, offerId?: string): React.ReactNode {
   const links: Array<{ href: string; label: string }> = [];
-  if (event.entityType === "PIECE") links.push({ href: offerId ? `/offers/${offerId}/pieces/${event.entityId}` : "/offers", label: "Voir la pièce" });
+  const relatedOfferId = offerId ?? (typeof event.metadata?.offerId === "string" ? event.metadata.offerId : undefined);
+  if (event.entityType === "PIECE" && relatedOfferId) links.push({ href: `/offers/${relatedOfferId}/pieces/${event.entityId}`, label: "Voir la pièce" });
   if (event.entityType === "OFFER") links.push({ href: `/offers/${event.entityId}`, label: "Voir l’offre" });
   if (event.entityType === "MACHINE") links.push({ href: `/machines/${event.entityId}`, label: "Voir la machine" });
+  if (event.entityType === "CLIENT") links.push({ href: `/clients/${event.entityId}`, label: "Voir le client" });
+  if (event.entityType === "CLIENT") links.push({ href: `/clients/${event.entityId}`, label: "Voir le client" });
   const pieceId = event.metadata?.pieceId;
   const machineId = event.metadata?.machineId;
   if (typeof pieceId === "string") {
@@ -156,17 +198,12 @@ function HistoryEventRow({ event, offerId }: { event: ManagedHistoryEvent; offer
           <p className="mt-1 text-xs text-slate-500">{formatDate(event.createdAt)}</p>
         </td>
         <td className="px-5 py-4">
-          <Badge variant="outline">{entityLabel(event.entityType)}</Badge>
-          <p
-            className="mt-1 max-w-48 truncate font-mono text-[11px] text-slate-400"
-            title={event.entityId}
-          >
-            {event.entityType === "PIECE" ? <Link href={offerId ? `/offers/${offerId}/pieces/${event.entityId}` : "/offers"} className="hover:text-nim-red hover:underline">{event.entityId}</Link> : event.entityType === "MACHINE" ? <Link href={`/machines/${event.entityId}`} className="hover:text-nim-red hover:underline">{event.entityId}</Link> : event.entityId}
-          </p>
+          <HistoryEntityBadge entityType={event.entityType} />
+          {entityReference(event) ? <p className="mt-1 max-w-48 truncate text-xs text-slate-500">{entityReference(event)}</p> : null}
         </td>
         <td className="px-5 py-4">
           <p className="text-sm text-slate-700">{event.actorName ?? "Système"}</p>
-          <p className="mt-1 text-xs text-slate-400">{event.actorRole ?? "SYSTEM"}</p>
+          <div className="mt-1"><HistoryActorRole role={event.actorRole} /></div>
         </td>
         <td className="px-5 py-4 text-sm text-slate-500">{summary ?? "—"}{traceabilityLinks(event, offerId)}</td>
       </tr>
@@ -183,14 +220,15 @@ function HistoryEventCard({ event, offerId }: { event: ManagedHistoryEvent; offe
           <p className="font-medium text-slate-900">{eventLabel(event.eventType)}</p>
           <p className="mt-1 text-xs text-slate-500">{formatDate(event.createdAt)}</p>
         </div>
-        <Badge variant="outline">{entityLabel(event.entityType)}</Badge>
+        <HistoryEntityBadge entityType={event.entityType} />
       </div>
       <div className="mt-4 grid gap-2 text-xs text-slate-500">
         <span>
           Acteur :{" "}
           <strong className="font-medium text-slate-700">{event.actorName ?? "Système"}</strong>
         </span>
-        <span className="font-mono text-[11px]">ID : {event.entityId}</span>
+        <span className="flex flex-wrap items-center gap-2">Rôle : <HistoryActorRole role={event.actorRole} /></span>
+        {entityReference(event) ? <span>Référence : {entityReference(event)}</span> : null}
         {traceabilityLinks(event, offerId)}
         {summary ? <StatusBadge tone="neutral">{summary}</StatusBadge> : null}
       </div>
@@ -199,21 +237,38 @@ function HistoryEventCard({ event, offerId }: { event: ManagedHistoryEvent; offe
 }
 
 export function HistoryView({ offerId }: { offerId?: string } = {}): React.ReactNode {
+  const { params: urlParams, update: updateUrl } = useListQueryState();
   const { user } = useAuth();
   const canRead = Boolean(user && ["ADMIN", "PRODUCTION_MANAGER"].includes(user.role));
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [eventType, setEventType] = useState("ALL");
-  const [entityType, setEntityType] = useState("ALL");
+  const [page, setPage] = useState(() => Math.max(1, Number(getInitialListParam("page", "1")) || 1));
+  const [pageSize, setPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("pageSize", "20"))) ? Number(getInitialListParam("pageSize", "20")) : 20);
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
+  const [eventType, setEventType] = useState(() => ["ALL", ...eventOptions].includes(getInitialListParam("eventType", "ALL")) ? getInitialListParam("eventType", "ALL") : "ALL");
+  const [entityType, setEntityType] = useState(() => ["ALL", ...entityOptions].includes(getInitialListParam("entityType", "ALL")) ? getInitialListParam("entityType", "ALL") : "ALL");
+  const [sorting, setSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "eventType", sortDirection: "asc" });
+  useEffect(() => {
+    setPage(Math.max(1, Number(urlParams.get("page")) || 1));
+    const nextPageSize = Number(urlParams.get("pageSize"));
+    if ([10, 20, 50].includes(nextPageSize)) setPageSize(nextPageSize);
+    setSearch(urlParams.get("search") ?? "");
+    const nextEvent = urlParams.get("eventType") ?? "ALL";
+    setEventType(["ALL", ...eventOptions].includes(nextEvent) ? nextEvent : "ALL");
+    const nextEntity = urlParams.get("entityType") ?? "ALL";
+    setEntityType(["ALL", ...entityOptions].includes(nextEntity) ? nextEntity : "ALL");
+  }, [urlParams]);
+  useEffect(() => {
+    updateUrl({ page, pageSize, search: search.trim(), eventType: eventType === "ALL" ? null : eventType, entityType: entityType === "ALL" ? null : entityType });
+  }, [page, pageSize, search, eventType, entityType, updateUrl]);
   const queryInput = useMemo(
     () => ({
       page,
-      pageSize: 25,
+      pageSize,
       search,
       eventType: eventType === "ALL" ? undefined : eventType,
       entityType: entityType === "ALL" ? undefined : entityType,
+      ...sorting,
     }),
-    [entityType, eventType, page, search],
+    [entityType, eventType, page, pageSize, search, sorting],
   );
   const historyQuery = useQuery({
     queryKey: ["history", offerId ?? "ALL", queryInput],
@@ -224,6 +279,9 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
   const data = historyQuery.data;
   const events = data?.events ?? [];
   const hasFilters = Boolean(search.trim()) || eventType !== "ALL" || entityType !== "ALL";
+  useEffect(() => {
+    if (data && data.totalPages > 0 && page > data.totalPages) setPage(data.totalPages);
+  }, [data, page]);
 
   if (!canRead) return <AccessDenied />;
 
@@ -239,7 +297,7 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
       <PageHeader
         eyebrow={offerId ? "Offre · Traçabilité" : "Traçabilité"}
         title="Historique"
-        description={offerId ? "Événements liés uniquement à cette offre, ses pièces, son façonnage et sa production." : "Suivez chaque changement métier avec son acteur, son contexte et son horodatage."}
+        description={offerId ? "Événements liés uniquement à cette affaire, ses pièces, son façonnage et sa production." : "Journal complet, toutes dates confondues : suivez les changements métier avec leur acteur et leur contexte."}
         action={
           <Button
             variant="outline"
@@ -280,14 +338,14 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
           <div>
             <CardTitle className="text-sm">Journal des événements</CardTitle>
             <p className="mt-1 text-xs text-slate-500">
-              Les événements ne sont jamais supprimés par l’interface.
+              Historique append-only : les événements ne sont jamais supprimés par l’interface.
             </p>
           </div>
           <Button variant="ghost" size="sm" onClick={resetFilters} disabled={!hasFilters}>
             Réinitialiser
           </Button>
         </CardHeader>
-        <CardContent className="border-t border-slate-100 p-4">
+        <CardContent className="nim-sticky-table-tools border-t border-slate-100 p-4">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.4fr)_minmax(170px,0.8fr)_minmax(170px,0.8fr)]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
@@ -297,7 +355,7 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
                   setSearch(event.target.value);
                   setPage(1);
                 }}
-                placeholder="Rechercher un événement ou un identifiant"
+                placeholder="Rechercher un événement, une référence ou un identifiant"
                 aria-label="Rechercher dans l’historique"
                 className="pl-9 pr-9"
               />
@@ -342,7 +400,9 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
               </SelectContent>
             </Select>
           </div>
-          <p className="mt-3 text-xs font-medium text-slate-600" aria-live="polite">{events.length} evenement(s) affiche(s) sur cette page</p>
+          <p className="mt-3 text-xs font-medium text-slate-600" aria-live="polite">
+            {(data?.total ?? 0).toLocaleString("fr-FR")} événement{data?.total === 1 ? "" : "s"} correspondent aux filtres
+          </p>
         </CardContent>
         <CardContent className="p-0">
           {historyQuery.isLoading ? (
@@ -376,14 +436,21 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
           ) : (
             <>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table
+                  className="nim-data-table w-full text-left text-sm"
+                  serverSorting={{ column: ({ eventType: "Événement", entityType: "Entité", actorName: "Acteur" } as Record<string, string>)[sorting.sortBy] ?? "Événement", direction: sorting.sortDirection }}
+                  onServerSort={(column, direction) => {
+                    const sortBy = ({ Événement: "eventType", Entité: "entityType", Acteur: "actorName" } as Record<string, string>)[column];
+                    if (sortBy) { setSorting({ sortBy, sortDirection: direction }); setPage(1); }
+                  }}
+                >
                   <caption className="sr-only">Journal des événements de traçabilité</caption>
                   <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                     <tr>
                       <th className="px-5 py-3 font-medium">Événement</th>
                       <th className="px-5 py-3 font-medium">Entité</th>
                       <th className="px-5 py-3 font-medium">Acteur</th>
-                      <th className="px-5 py-3 font-medium">Contexte</th>
+                      <th data-sortable="false" className="px-5 py-3 font-medium">Contexte</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -391,7 +458,7 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
                       <HistoryEventRow key={event.id} event={event} offerId={offerId} />
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
                 {events.map((event) => (
@@ -401,32 +468,17 @@ export function HistoryView({ offerId }: { offerId?: string } = {}): React.React
             </>
           )}
         </CardContent>
-        {data && data.totalPages > 1 ? (
-          <CardContent className="flex items-center justify-between border-t border-slate-100 px-4 py-3 sm:px-5">
-            <p className="text-xs text-slate-500">
-              Page {data.page} sur {data.totalPages} · {data.total} événements
-            </p>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((current) => Math.max(1, current - 1))}
-                disabled={page <= 1 || historyQuery.isFetching}
-              >
-                <ChevronLeft className="size-4" />
-                Précédent
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((current) => Math.min(data.totalPages, current + 1))}
-                disabled={page >= data.totalPages || historyQuery.isFetching}
-              >
-                Suivant
-                <ChevronRight className="size-4" />
-              </Button>
-            </div>
-          </CardContent>
+        {data && data.total > 0 ? (
+          <Pagination
+            page={data.page}
+            pageCount={data.totalPages}
+            pageSize={data.pageSize}
+            total={data.total}
+            pageSizes={pageSizes}
+            itemLabel="événement"
+            onPageChange={setPage}
+            onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+          />
         ) : null}
       </Card>
       <p className="flex items-center gap-2 text-xs text-slate-400">

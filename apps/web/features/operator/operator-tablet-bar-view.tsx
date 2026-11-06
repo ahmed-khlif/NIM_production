@@ -15,6 +15,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -63,9 +64,9 @@ export function OperatorTabletBarView(): React.ReactNode {
   });
   useEffect(() => {
     if (operatorQuery.error instanceof ApiError && operatorQuery.error.status === 401)
-      router.replace("/production/login");
+      router.replace("/login");
     if (barQuery.error instanceof ApiError && barQuery.error.status === 401)
-      router.replace("/production/login");
+      router.replace("/login");
   }, [barQuery.error, operatorQuery.error, router]);
 
   if (operatorQuery.isLoading || barQuery.isLoading)
@@ -109,7 +110,7 @@ export function OperatorTabletBarView(): React.ReactNode {
         operator={operator}
         machineName={session.machineName}
         action={
-          <Badge className="min-h-8 bg-blue-50 px-3 text-blue-800 hover:bg-blue-50">Affectée</Badge>
+          <StatusBadge tone="info" className="min-h-8 px-3">Affectée</StatusBadge>
         }
       />
       <main className="mx-auto max-w-4xl space-y-4 p-4 pt-5 sm:p-6 sm:pt-7">
@@ -211,7 +212,7 @@ export function OperatorTabletBarView(): React.ReactNode {
                   </p>
                 </div>
                 <div className="text-right">
-                  <Badge variant="outline">Affectée</Badge>
+                  <StatusBadge tone="info">Affectée</StatusBadge>
                   {item.qualityStatus === "NON_CONFORME" ? (
                     <p className="mt-1 text-[11px] text-red-700">Alerte qualité</p>
                   ) : null}

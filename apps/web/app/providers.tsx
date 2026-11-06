@@ -1,6 +1,6 @@
 "use client";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { useState } from "react";
 import { Toaster } from "sonner";
@@ -10,9 +10,10 @@ import { OfflineStatus } from "@/components/pwa/offline-status";
 import { ServiceWorkerRegister } from "@/components/pwa/service-worker-register";
 import { RealtimeSync } from "@/components/realtime/realtime-sync";
 import { UiPreferencesSync } from "@/components/preferences/ui-preferences-sync";
+import { createAppQueryClient } from "@/lib/query-client";
 
 export function Providers({ children }: Readonly<{ children: React.ReactNode }>): React.ReactNode {
-  const [queryClient] = useState(() => new QueryClient());
+  const [queryClient] = useState(createAppQueryClient);
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -13,7 +13,10 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>):
       <AppSidebar />
       <div className="min-w-0 flex-1">
         <AppHeader />
-        <main id="main-content" className="mx-auto max-w-[1600px] p-5 lg:p-8">
+        <main
+          id="main-content"
+          className="mx-auto min-w-0 w-full max-w-[1600px] px-4 py-5 sm:px-6 sm:py-6 xl:px-8 xl:py-8"
+        >
           {children}
         </main>
       </div>

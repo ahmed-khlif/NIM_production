@@ -1,6 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useQueryClient } from "@tanstack/react-query";
 import { loginSchema, type LoginInput } from "@nim/validation";
 import {
   AlertCircle,
@@ -22,11 +23,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, loginRequest } from "./auth-client";
+import {
+  ApiError,
+  getCurrentTabletOperatorRequest,
+  loginRequest,
+  operatorTabletLoginRequest,
+} from "./auth-client";
 import { useAuth } from "./auth-provider";
 
 export function LoginForm(): React.ReactNode {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { refresh } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -43,18 +50,36 @@ export function LoginForm(): React.ReactNode {
     setSubmitError(null);
     try {
       const result = await loginRequest(values);
+      if (result.user.role === "OPERATOR") {
+        // The regular sign-in creates the application session. Create and verify
+        // the dedicated tablet session as part of the same visible login flow.
+        await operatorTabletLoginRequest(values);
+        await queryClient.cancelQueries({ queryKey: ["tablet", "operator"] });
+        const tabletSession = await getCurrentTabletOperatorRequest();
+        if (tabletSession.operator.id !== result.user.id) {
+          throw new Error(
+            "La session de production de l’opérateur n’a pas pu être confirmée. Réessayez.",
+          );
+        }
+        queryClient.setQueryData(["tablet", "operator"], tabletSession);
+      }
       await refresh();
       toast.success(`Bienvenue, ${result.user.displayName}`);
       const destination =
         result.user.role === "QUALITY_CONTROLLER"
           ? "/quality"
           : result.user.role === "OPERATOR"
-            ? "/production/login"
+            ? "/production/tablet"
             : "/dashboard";
-      router.push(destination);
+      if (result.user.role === "OPERATOR") router.replace(destination);
+      else router.push(destination);
     } catch (error) {
       const message =
-        error instanceof ApiError ? error.message : "Impossible de se connecter pour le moment.";
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error && error.message
+            ? error.message
+            : "Impossible de se connecter pour le moment.";
       setSubmitError(message);
       toast.error(message);
     }
@@ -62,7 +87,7 @@ export function LoginForm(): React.ReactNode {
 
   return (
     <main className="grid min-h-screen bg-background lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
-      <section className="relative hidden overflow-hidden bg-nim-dark lg:block">
+      <section className="pointer-events-none relative hidden overflow-hidden bg-nim-dark lg:block">
         <Image
           src="/assets/illustrations/login-security.png"
           alt="Illustration industrielle NIM"
@@ -72,15 +97,23 @@ export function LoginForm(): React.ReactNode {
           priority
         />
         <div className="pointer-events-none absolute inset-0 bg-nim-dark/65" />
+        <div
+          aria-hidden="true"
+          className="nim-login-glow pointer-events-none absolute right-[12%] top-[14%] size-72 rounded-full bg-[radial-gradient(circle,rgba(225,6,0,0.18),transparent_70%)]"
+        />
+        <div className="absolute left-12 top-[44%] flex items-center gap-2 xl:left-20">
+          <span className="h-px w-12 bg-white/20" />
+          <span className="nim-login-signal size-1.5 rounded-full bg-nim-red shadow-[0_0_12px_rgba(225,6,0,0.7)]" />
+        </div>
         <div className="absolute inset-x-0 bottom-0 p-12 xl:p-20">
-          <NimLogo invert />
-          <p className="mt-10 max-w-lg text-3xl font-semibold leading-tight tracking-tight text-white xl:text-5xl">
+          <div className="nim-login-enter"><NimLogo invert /></div>
+          <p className="nim-login-enter nim-login-enter-delay-1 mt-10 max-w-lg text-3xl font-semibold leading-tight tracking-tight text-white xl:text-5xl">
             La production, avec la précision qui fait notre industrie.
           </p>
-          <p className="mt-5 max-w-md text-sm leading-6 text-slate-300">
+          <p className="nim-login-enter nim-login-enter-delay-2 mt-5 max-w-md text-sm leading-6 text-slate-300">
             Une vue claire sur les opérations, les machines et la traçabilité de chaque pièce.
           </p>
-          <div className="mt-10 flex items-center gap-2 text-xs text-slate-400">
+          <div className="nim-login-enter nim-login-enter-delay-3 mt-10 flex items-center gap-2 text-xs text-slate-400">
             <span className="size-1.5 rounded-full bg-nim-red" />
             Production · Planification · Traçabilité
           </div>
@@ -88,10 +121,10 @@ export function LoginForm(): React.ReactNode {
       </section>
       <section className="flex items-center justify-center px-5 py-10 sm:px-10">
         <div className="w-full max-w-[390px]">
-          <div className="mb-12 lg:hidden">
+          <div className="nim-login-enter mb-12 lg:hidden">
             <NimLogo />
           </div>
-          <div className="mb-7">
+          <div className="nim-login-enter mb-7">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-nim-red">
               Espace sécurisé
             </p>
@@ -100,7 +133,7 @@ export function LoginForm(): React.ReactNode {
               Accédez au suivi de production NIM.
             </p>
           </div>
-          <Card className="border-slate-200 shadow-sm">
+          <Card className="nim-login-enter nim-login-enter-delay-1 border-slate-200 shadow-sm transition-[box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none">
             <CardContent className="p-5 sm:p-6">
               <form
                 className="space-y-5"
@@ -111,8 +144,8 @@ export function LoginForm(): React.ReactNode {
               >
                 <div className="space-y-2">
                   <Label htmlFor="username">Identifiant</Label>
-                  <div className="relative">
-                    <UserRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+                  <div className="group relative">
+                    <UserRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400 transition-colors group-focus-within:text-nim-red" />
                     <Input
                       id="username"
                       className="h-11 pl-10"
@@ -131,8 +164,8 @@ export function LoginForm(): React.ReactNode {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="password">Mot de passe</Label>
-                  <div className="relative">
-                    <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+                  <div className="group relative">
+                    <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400 transition-colors group-focus-within:text-nim-red" />
                     <Input
                       id="password"
                       className="h-11 pl-10 pr-12"
@@ -173,7 +206,7 @@ export function LoginForm(): React.ReactNode {
                   </p>
                 ) : null}
                 <Button
-                  className="h-11 w-full"
+                  className="h-11 w-full transition-transform duration-150 hover:-translate-y-0.5 active:translate-y-0 motion-reduce:transform-none"
                   type="submit"
                   disabled={isSubmitting}
                   aria-busy={isSubmitting}
@@ -193,10 +226,10 @@ export function LoginForm(): React.ReactNode {
               </form>
             </CardContent>
           </Card>
-          <div className="mt-6 space-y-2 text-center text-xs text-slate-400">
+          <div className="nim-login-enter nim-login-enter-delay-2 mt-6 space-y-2 text-center text-xs text-slate-400">
             <p>Mot de passe oublié ? Contactez votre administrateur NIM.</p>
             <Link
-              href="/production/login"
+              href="/production/tablet"
               className="inline-flex font-semibold text-slate-600 transition-colors hover:text-nim-red"
             >
               Accès opérateur tablette →

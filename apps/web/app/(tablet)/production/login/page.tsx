@@ -1,5 +1,5 @@
-import { OperatorTabletLoginView } from "@/features/operator/operator-tablet-login-view";
+import { redirect } from "next/navigation";
 
-export default function OperatorTabletLoginPage(): React.ReactNode {
-  return <OperatorTabletLoginView />;
+export default function OperatorTabletLoginPage(): never {
+  redirect("/login");
 }

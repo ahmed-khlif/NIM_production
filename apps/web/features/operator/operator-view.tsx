@@ -18,6 +18,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 import { toast } from "sonner";
 import { NimLogo } from "@/components/brand/nim-logo";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -41,6 +42,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PriorityBadge } from "@/components/ui/priority-badge";
 import {
   ApiError,
   finishProductionRequest,
@@ -92,8 +94,8 @@ function QueueItem({
           <Link href={offerId ? `/offers/${offerId}/pieces/${item.pieceId}` : "/offers"} className="font-semibold text-slate-950 underline-offset-4 hover:text-nim-red hover:underline">
             {item.reference}
           </Link>
-          <StatusBadge tone="warning">En attente</StatusBadge>
-          <Badge variant="outline">{item.priority === "HIGH" ? "Haute" : item.priority === "LOW" ? "Basse" : "Normale"}</Badge>
+          <StatusBadge tone="info">En attente</StatusBadge>
+          <PriorityBadge priority={item.priority} />
         </div>
         <p className="mt-1 text-sm text-slate-600">
           Unité {String(item.sequenceNumber).padStart(2, "0")} · {item.profile} · {item.lengthMm} mm
@@ -447,13 +449,13 @@ export function OperatorView(): React.ReactNode {
       <main className="min-h-screen bg-slate-50">
         <header className="flex min-h-[72px] items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-8">
           <div className="flex items-center gap-3">
-            <Link
+            <ReturnLink
               href={offerId ? `/offers/${offerId}/production` : "/dashboard"}
               className="rounded-md p-2 text-slate-500 transition-colors hover:bg-slate-100"
               aria-label="Retour au tableau de bord"
             >
               <ChevronLeft className="size-5" />
-            </Link>
+            </ReturnLink>
             <div className="h-6 w-px bg-slate-200" />
             <div className="sm:hidden">
               <NimLogo compact />

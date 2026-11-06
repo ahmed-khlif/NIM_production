@@ -1,6 +1,7 @@
 "use client";
 
-import type { AssignablePieceUnit, ManagedAssignment, ManagedMachine } from "@nim/types";
+import { Table } from "@/components/ui/table";
+import type { ManagedAssignment, ManagedMachine } from "@nim/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRightLeft,
@@ -17,24 +18,26 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 import Link from "next/link";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
+import { Pagination } from "@/components/ui/pagination";
+import { PriorityBadge } from "@/components/ui/priority-badge";
 import {
   Select,
   SelectContent,
@@ -46,6 +49,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   ApiError,
   createAssignmentRequest,
+  getAvailableAssignmentUnitsRequest,
   getAssignmentsRequest,
   getMachinesRequest,
   getOfferRequest,
@@ -53,9 +57,7 @@ import {
   unassignAssignmentRequest,
 } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
-
-const priorityLabels = { HIGH: "Haute", NORMAL: "Normale", LOW: "Basse" } as const;
-const priorityTones = { HIGH: "danger", NORMAL: "warning", LOW: "neutral" } as const;
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 
 type AssignmentForm = {
   pieceUnitId: string;
@@ -82,10 +84,10 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
-function AssignmentDialog({
+function AssignmentSheet({
   open,
   onOpenChange,
-  units,
+  offerId,
   machines,
   form,
   setForm,
@@ -95,7 +97,7 @@ function AssignmentDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  units: AssignablePieceUnit[];
+  offerId?: string;
   machines: ManagedMachine[];
   form: AssignmentForm;
   setForm: (form: AssignmentForm) => void;
@@ -103,25 +105,42 @@ function AssignmentDialog({
   busy: boolean;
   onSubmit: () => void;
 }): React.ReactNode {
+  const [unitSearch, setUnitSearch] = useState("");
+  const [unitDebounced, setUnitDebounced] = useState("");
+  const [unitPage, setUnitPage] = useState(1);
   useEffect(() => {
     if (open) setForm(emptyAssignmentForm);
   }, [open, setForm]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setUnitDebounced(unitSearch.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [unitSearch]);
+  useEffect(() => setUnitPage(1), [unitDebounced]);
+  const unitsQuery = useQuery({
+    queryKey: ["assignment-available-units", unitPage, unitDebounced],
+    queryFn: () => getAvailableAssignmentUnitsRequest({ offerId, page: unitPage, pageSize: 10, search: unitDebounced }),
+    enabled: open,
+    retry: false,
+  });
+  const units = unitsQuery.data?.availableUnits ?? [];
+  const unitsPagination = unitsQuery.data?.pagination;
   const availableMachines = machines.filter((machine) => machine.status === "ACTIVE");
   const setField = <K extends keyof AssignmentForm>(field: K, value: AssignmentForm[K]): void =>
     setForm({ ...form, [field]: value });
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-[560px]">
-        <DialogHeader>
-          <DialogTitle>Affecter une unité</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[560px] dark:border-slate-800 dark:bg-slate-950">
+        <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+          <SheetTitle>Affecter une unité</SheetTitle>
+          <SheetDescription>
             Choisissez une unité traçable et une machine active. L’affectation sera enregistrée dans
             l’historique.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
           <div className="space-y-2">
             <Label>Unité de pièce</Label>
+            <Input value={unitSearch} onChange={(event) => setUnitSearch(event.target.value)} placeholder="Rechercher une référence ou un profil" aria-label="Rechercher une unité disponible" />
             <Select
               value={form.pieceUnitId}
               onValueChange={(value) => setField("pieceUnitId", value)}
@@ -140,6 +159,8 @@ function AssignmentDialog({
                 ))}
               </SelectContent>
             </Select>
+            {unitsQuery.isError ? <p role="alert" className="text-xs text-red-700">Impossible de charger les unités. <button type="button" className="underline" onClick={() => void unitsQuery.refetch()}>Réessayer</button></p> : null}
+            {unitsPagination ? <Pagination page={unitsPagination.page} pageCount={unitsPagination.totalPages} pageSize={unitsPagination.pageSize} total={unitsPagination.total} pageSizes={[10]} itemLabel="unité" onPageChange={setUnitPage} onPageSizeChange={() => undefined} /> : null}
           </div>
           <div className="space-y-2">
             <Label>Machine active</Label>
@@ -188,7 +209,7 @@ function AssignmentDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
           <Button
             type="button"
             variant="outline"
@@ -209,13 +230,13 @@ function AssignmentDialog({
             )}
             Affecter l’unité
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 
-function ReassignDialog({
+function ReassignSheet({
   open,
   onOpenChange,
   target,
@@ -245,17 +266,17 @@ function ReassignDialog({
   const setField = <K extends keyof ReassignForm>(field: K, value: ReassignForm[K]): void =>
     setForm({ ...form, [field]: value });
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-[520px]">
-        <DialogHeader>
-          <DialogTitle>Réaffecter l’unité</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[520px] dark:border-slate-800 dark:bg-slate-950">
+        <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+          <SheetTitle>Réaffecter l’unité</SheetTitle>
+          <SheetDescription>
             {target
               ? `${target.reference} · Unité ${String(target.sequenceNumber).padStart(2, "0")} quittera ${target.machineName}. L’ancienne affectation restera conservée.`
               : "Choisissez une nouvelle machine."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
           <div className="space-y-2">
             <Label>Nouvelle machine active</Label>
             <Select value={form.machineId} onValueChange={(value) => setField("machineId", value)}>
@@ -303,7 +324,7 @@ function ReassignDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
           <Button
             type="button"
             variant="outline"
@@ -320,13 +341,14 @@ function ReassignDialog({
             )}
             Réaffecter
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 export function AssignmentsView(): React.ReactNode {
+  const { params: urlParams, update: updateUrl } = useListQueryState();
   const searchParams = useSearchParams();
   const offerId = searchParams.get("offerId")?.trim() || undefined;
   const { user } = useAuth();
@@ -339,11 +361,30 @@ export function AssignmentsView(): React.ReactNode {
   const [reassignForm, setReassignForm] = useState<ReassignForm>(emptyReassignForm);
   const [unassignReason, setUnassignReason] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [machineFilter, setMachineFilter] = useState("ALL");
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [page, setPage] = useState(() => Math.max(1, Number(getInitialListParam("page", "1")) || 1));
+  const [pageSize, setPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("pageSize", "20"))) ? Number(getInitialListParam("pageSize", "20")) : 20);
+  const [machineFilter, setMachineFilter] = useState(() => getInitialListParam("machineId", "ALL"));
+  const [sorting, setSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "assignedAt", sortDirection: "desc" });
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => setPage(1), [debouncedSearch, machineFilter, offerId, pageSize]);
+  useEffect(() => {
+    setSearch(urlParams.get("search") ?? "");
+    setMachineFilter(urlParams.get("machineId") ?? "ALL");
+    setPage(Math.max(1, Number(urlParams.get("page")) || 1));
+    const nextSize = Number(urlParams.get("pageSize"));
+    if ([10, 20, 50].includes(nextSize)) setPageSize(nextSize);
+  }, [urlParams]);
+  useEffect(() => {
+    updateUrl({ search: search.trim(), machineId: machineFilter === "ALL" ? null : machineFilter, page, pageSize });
+  }, [search, machineFilter, page, pageSize, updateUrl]);
   const assignmentsQuery = useQuery({
-    queryKey: ["assignments", offerId ?? "ALL"],
-    queryFn: () => getAssignmentsRequest(offerId),
+    queryKey: ["assignments", offerId ?? "ALL", page, pageSize, debouncedSearch, machineFilter, sorting],
+    queryFn: () => getAssignmentsRequest({ offerId, page, pageSize, search: debouncedSearch, machineId: machineFilter === "ALL" ? undefined : machineFilter, ...sorting }),
     retry: false,
   });
   const offerQuery = useQuery({
@@ -419,27 +460,17 @@ export function AssignmentsView(): React.ReactNode {
   });
 
   const assignments = assignmentsQuery.data?.assignments ?? [];
-  const availableUnits = assignmentsQuery.data?.availableUnits ?? [];
-  const filteredAssignments = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return assignments.filter((item) => {
-      const matchesSearch =
-        !term ||
-        `${item.reference} ${item.profile} ${item.machineName} ${item.machineStatus}`
-          .toLowerCase()
-          .includes(term);
-      const matchesMachine = machineFilter === "ALL" || item.machineId === machineFilter;
-      return matchesSearch && matchesMachine;
-    });
-  }, [assignments, machineFilter, search]);
+  const availableUnitCount = assignmentsQuery.data?.availableUnitCount ?? 0;
+  const pagination = assignmentsQuery.data?.pagination ?? { page, pageSize, total: 0, totalPages: 1 };
   const hasFilters = Boolean(search.trim()) || machineFilter !== "ALL";
-  const activeMachines = new Set(assignments.map((item) => item.machineId)).size;
+  const activeMachines = assignmentsQuery.data?.activeMachineCount ?? 0;
   const refresh = (): void => {
     void Promise.all([assignmentsQuery.refetch(), machinesQuery.refetch()]);
   };
   const resetFilters = (): void => {
     setSearch("");
     setMachineFilter("ALL");
+    setPage(1);
   };
   const openAssign = (): void => {
     setFormError(null);
@@ -500,7 +531,7 @@ export function AssignmentsView(): React.ReactNode {
           <div className="flex flex-wrap gap-2">
             {offerId ? (
               <Button type="button" variant="outline" asChild>
-                <Link href={`/offers/${offerId}/production`}>Retour à l’offre</Link>
+                <ReturnLink href={`/offers/${offerId}`}>Retour à l’affaire</ReturnLink>
               </Button>
             ) : null}
             <Button
@@ -531,7 +562,7 @@ export function AssignmentsView(): React.ReactNode {
             </div>
             <div>
               <p className="text-xs text-slate-500">Affectations actives</p>
-              <p className="mt-1 text-2xl font-semibold text-slate-950">{assignments.length}</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950">{pagination.total.toLocaleString("fr-FR")}</p>
             </div>
           </CardContent>
         </Card>
@@ -542,7 +573,7 @@ export function AssignmentsView(): React.ReactNode {
             </div>
             <div>
               <p className="text-xs text-slate-500">Unités à affecter</p>
-              <p className="mt-1 text-2xl font-semibold text-slate-950">{availableUnits.length}</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-950">{availableUnitCount.toLocaleString("fr-FR")}</p>
             </div>
           </CardContent>
         </Card>
@@ -572,7 +603,7 @@ export function AssignmentsView(): React.ReactNode {
         </Card>
       </div>
       <Card>
-        <CardHeader className="gap-4">
+        <CardHeader className="nim-sticky-table-tools gap-4">
           <div>
             <CardTitle className="text-sm">Tableau des affectations</CardTitle>
             <p className="mt-1 text-xs text-slate-500">
@@ -619,7 +650,7 @@ export function AssignmentsView(): React.ReactNode {
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3 text-xs text-slate-500">
             <span>
-              {filteredAssignments.length} affectation(s) affichée(s) sur {assignments.length}
+              {pagination.total.toLocaleString("fr-FR")} affectation(s) correspondent aux filtres
             </span>
             {hasFilters ? (
               <Button
@@ -665,14 +696,14 @@ export function AssignmentsView(): React.ReactNode {
                 Réessayer
               </Button>
             </div>
-          ) : filteredAssignments.length === 0 ? (
+          ) : assignments.length === 0 ? (
             <div className="p-5">
               <EmptyState
                 title={hasFilters ? "Aucun résultat" : "Aucune affectation active"}
                 description={
                   hasFilters
                     ? "Modifiez votre recherche."
-                    : canManage && availableUnits.length
+                    : canManage && availableUnitCount > 0
                       ? "Des unités sont prêtes à être affectées."
                       : "Les affectations apparaîtront ici dès qu’elles seront créées."
                 }
@@ -681,7 +712,14 @@ export function AssignmentsView(): React.ReactNode {
           ) : (
             <>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table
+                  serverSorting={{ column: ({ reference: "Unité", profile: "Profil", machine: "Machine", priority: "Priorité", assignedAt: "Affectée le", status: "Unité" } as const)[sorting.sortBy as "reference" | "profile" | "machine" | "priority" | "assignedAt" | "status"], direction: sorting.sortDirection }}
+                  onServerSort={(column, direction) => {
+                    const field = ({ Unité: "reference", Profil: "profile", Machine: "machine", Priorité: "priority", "Affectée le": "assignedAt" } as const)[column as "Unité" | "Profil" | "Machine" | "Priorité" | "Affectée le"];
+                    if (field) { setSorting({ sortBy: field, sortDirection: direction }); setPage(1); }
+                  }}
+                  className="nim-data-table w-full text-left text-sm"
+                >
                   <caption className="sr-only">Affectations actives par unité et machine</caption>
                   <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                     <tr>
@@ -690,11 +728,11 @@ export function AssignmentsView(): React.ReactNode {
                       <th className="px-5 py-3 font-medium">Machine</th>
                       <th className="px-5 py-3 font-medium">Priorité</th>
                       <th className="px-5 py-3 font-medium">Affectée le</th>
-                      <th className="px-5 py-3 text-right font-medium">Actions</th>
+                      <th className="px-5 py-3 text-right font-medium" data-sortable="false">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {filteredAssignments.map((item) => (
+                    {assignments.map((item) => (
                       <tr key={item.id} className="transition-colors hover:bg-slate-50/70">
                         <td className="px-5 py-4">
                           <Link
@@ -725,18 +763,7 @@ export function AssignmentsView(): React.ReactNode {
                           </div>
                         </td>
                         <td className="px-5 py-4">
-                          <Badge
-                            variant="outline"
-                            className={
-                              priorityTones[item.priority] === "danger"
-                                ? "border-red-200 text-red-700"
-                                : priorityTones[item.priority] === "warning"
-                                  ? "border-amber-200 text-amber-700"
-                                  : "text-slate-500"
-                            }
-                          >
-                            {priorityLabels[item.priority]}
-                          </Badge>
+                          <PriorityBadge priority={item.priority} />
                         </td>
                         <td className="px-5 py-4 text-xs text-slate-500">
                           {formatDate(item.assignedAt)}
@@ -777,10 +804,10 @@ export function AssignmentsView(): React.ReactNode {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
-                {filteredAssignments.map((item) => (
+                {assignments.map((item) => (
                   <div key={item.id} className="rounded-lg border border-slate-100 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -792,7 +819,7 @@ export function AssignmentsView(): React.ReactNode {
                         </Link>
                         <p className="mt-1 truncate text-xs text-slate-500">{item.profile}</p>
                       </div>
-                      <Badge variant="outline">{priorityLabels[item.priority]}</Badge>
+                      <PriorityBadge priority={item.priority} />
                     </div>
                     <div className="mt-4 grid gap-2 text-xs text-slate-500">
                       <span className="inline-flex items-center gap-1.5">
@@ -838,13 +865,25 @@ export function AssignmentsView(): React.ReactNode {
           )}
         </CardContent>
       </Card>
-      <AssignmentDialog
+      {pagination.total > 0 ? (
+        <Pagination
+          page={pagination.page}
+          pageCount={pagination.totalPages}
+          pageSize={pagination.pageSize}
+          total={pagination.total}
+          pageSizes={[10, 20, 50]}
+          itemLabel="affectation"
+          onPageChange={setPage}
+          onPageSizeChange={(size) => setPageSize(size)}
+        />
+      ) : null}
+      <AssignmentSheet
         open={assignOpen}
+        offerId={offerId}
         onOpenChange={(open) => {
           setAssignOpen(open);
           if (!open) setFormError(null);
         }}
-        units={availableUnits}
         machines={machines}
         form={assignForm}
         setForm={setAssignForm}
@@ -852,7 +891,7 @@ export function AssignmentsView(): React.ReactNode {
         busy={createMutation.isPending}
         onSubmit={handleCreate}
       />
-      <ReassignDialog
+      <ReassignSheet
         open={Boolean(reassignTarget)}
         onOpenChange={(open) => {
           if (!open) {
@@ -868,22 +907,22 @@ export function AssignmentsView(): React.ReactNode {
         busy={reassignMutation.isPending}
         onSubmit={handleReassign}
       />
-      <Dialog
+      <Sheet
         open={Boolean(unassignTarget)}
         onOpenChange={(open) => {
           if (!open) setUnassignTarget(null);
         }}
       >
-        <DialogContent className="sm:max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle>Retirer l’affectation</DialogTitle>
-            <DialogDescription>
+        <SheetContent side="right" className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[480px] dark:border-slate-800 dark:bg-slate-950">
+          <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+            <SheetTitle>Retirer l’affectation</SheetTitle>
+            <SheetDescription>
               {unassignTarget
                 ? `${unassignTarget.reference} · Unité ${String(unassignTarget.sequenceNumber).padStart(2, "0")} redeviendra disponible pour une nouvelle affectation.`
                 : "Indiquez un motif."}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2 py-2">
+            </SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 space-y-2 overflow-y-auto px-6 py-5">
             <Label htmlFor="unassign-reason">Motif obligatoire</Label>
             <Input
               id="unassign-reason"
@@ -892,7 +931,7 @@ export function AssignmentsView(): React.ReactNode {
               placeholder="Correction de planification"
             />
           </div>
-          <DialogFooter>
+          <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
             <Button
               variant="outline"
               onClick={() => setUnassignTarget(null)}
@@ -912,9 +951,9 @@ export function AssignmentsView(): React.ReactNode {
               )}
               Retirer l’affectation
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -25,13 +25,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Pagination } from "@/components/ui/pagination";
 import {
   Select,
   SelectContent,
@@ -48,7 +49,10 @@ import {
   unassignOfferBarRequest,
 } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 import { CuttingBarStatusBadge } from "./offer-bar-ui";
+
+const MAX_ASSIGNMENT_SELECTION = 500;
 
 function localError(error: unknown): string {
   return error instanceof ApiError
@@ -57,19 +61,85 @@ function localError(error: unknown): string {
 }
 
 export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React.ReactNode {
+  const { params: urlParams, update: updateUrl } = useListQueryState();
+  const urlParamsKey = urlParams.toString();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canManage = user?.role === "ADMIN" || user?.role === "PRODUCTION_MANAGER";
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [availablePage, setAvailablePage] = useState(() =>
+    Math.max(1, Number(getInitialListParam("availablePage", "1")) || 1),
+  );
+  const [assignmentPage, setAssignmentPage] = useState(() =>
+    Math.max(1, Number(getInitialListParam("assignmentPage", "1")) || 1),
+  );
+  const [pageSize, setPageSize] = useState(() =>
+    [10, 20, 50].includes(Number(getInitialListParam("pageSize", "20")))
+      ? Number(getInitialListParam("pageSize", "20"))
+      : 20,
+  );
   const [machineId, setMachineId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [selectedBarCache, setSelectedBarCache] = useState<Record<string, ManagedCuttingBar>>({});
+  const [selectingAllAvailable, setSelectingAllAvailable] = useState(false);
+  const [allSelectedSearch, setAllSelectedSearch] = useState<string | null>(null);
+  const [allSelectedAvailableIds, setAllSelectedAvailableIds] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [unassignTarget, setUnassignTarget] = useState<ManagedCuttingBar | null>(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    setAvailablePage(1);
+    setAssignmentPage(1);
+  }, [debouncedSearch, pageSize]);
+  useEffect(() => {
+    const params = new URLSearchParams(urlParamsKey);
+    const nextSearch = params.get("search") ?? "";
+    const nextAvailablePage = Math.max(1, Number(params.get("availablePage")) || 1);
+    const nextAssignmentPage = Math.max(1, Number(params.get("assignmentPage")) || 1);
+    const nextSize = Number(params.get("pageSize"));
+    setSearch((current) => (current === nextSearch ? current : nextSearch));
+    setAvailablePage((current) => (current === nextAvailablePage ? current : nextAvailablePage));
+    setAssignmentPage((current) => (current === nextAssignmentPage ? current : nextAssignmentPage));
+    if ([10, 20, 50].includes(nextSize)) {
+      setPageSize((current) => (current === nextSize ? current : nextSize));
+    }
+  }, [urlParamsKey]);
+  useEffect(() => {
+    updateUrl({ search: search.trim(), availablePage, assignmentPage, pageSize });
+  }, [search, availablePage, assignmentPage, pageSize, updateUrl]);
   const assignmentQuery = useQuery({
-    queryKey: ["offer", offerId, "bar-assignments"],
-    queryFn: () => getOfferBarAssignmentsRequest(offerId),
+    queryKey: [
+      "offer",
+      offerId,
+      "bar-assignments",
+      availablePage,
+      assignmentPage,
+      pageSize,
+      debouncedSearch,
+    ],
+    queryFn: () =>
+      getOfferBarAssignmentsRequest(offerId, {
+        availablePage,
+        assignmentPage,
+        pageSize,
+        search: debouncedSearch,
+      }),
     retry: false,
   });
+  const availablePageCount = assignmentQuery.data?.pagination?.available?.totalPages;
+  const assignmentsPageCount = assignmentQuery.data?.pagination?.assignments?.totalPages;
+  useEffect(() => {
+    if (availablePageCount && availablePage > availablePageCount) {
+      setAvailablePage(availablePageCount);
+    }
+    if (assignmentsPageCount && assignmentPage > assignmentsPageCount) {
+      setAssignmentPage(assignmentsPageCount);
+    }
+  }, [availablePage, availablePageCount, assignmentPage, assignmentsPageCount]);
   const machinesQuery = useQuery({
     queryKey: ["machines"],
     queryFn: getMachinesRequest,
@@ -79,20 +149,13 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
   const activeMachines = machines.filter((machine) => machine.status === "ACTIVE");
   const availableBars = assignmentQuery.data?.availableBars ?? [];
   const selectedMachine = machines.find((machine) => machine.id === machineId) ?? null;
-  const selectedBars = availableBars.filter((bar) => selected.includes(bar.id));
-  const term = search.trim().toLocaleLowerCase("fr");
-  const filteredBars = useMemo(
-    () =>
-      availableBars.filter(
-        (bar) => !term || `${bar.reference} ${bar.profile}`.toLocaleLowerCase("fr").includes(term),
-      ),
-    [availableBars, term],
-  );
+  const selectedBars = selected
+    .map((id) => selectedBarCache[id])
+    .filter((bar): bar is ManagedCuttingBar => Boolean(bar));
   const machineBars = selectedMachine
-    ? (assignmentQuery.data?.assignments ?? []).filter(
-        (assignment) => assignment.machineId === selectedMachine.id,
-      )
-    : [];
+    ? (assignmentQuery.data?.machines?.find((machine) => machine.machineId === selectedMachine.id)
+        ?.assignmentCount ?? 0)
+    : 0;
 
   const refreshRelated = async (): Promise<void> => {
     await Promise.all([
@@ -110,8 +173,17 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
   const assignMutation = useMutation({
     mutationFn: () => assignOfferBarsRequest(offerId, { machineId, barIds: selected }),
     onSuccess: async ({ assignedCount }) => {
+      const currentAssignmentCount = assignmentQuery.data?.assignmentCount ?? 0;
+      const pageWithNewAssignments = Math.max(
+        1,
+        Math.ceil((currentAssignmentCount + assignedCount) / pageSize),
+      );
       await refreshRelated();
+      setAssignmentPage(pageWithNewAssignments);
       setSelected([]);
+      setSelectedBarCache({});
+      setAllSelectedAvailableIds([]);
+      setAllSelectedSearch(null);
       setConfirmOpen(false);
       toast.success(`${assignedCount} barre(s) affectée(s) à la machine.`);
     },
@@ -126,16 +198,105 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
     },
     onError: (error) => toast.error(localError(error)),
   });
-  const toggleBar = (barId: string, checked: boolean): void =>
+  const toggleBar = (bar: ManagedCuttingBar, checked: boolean): void => {
+    if (checked && !selected.includes(bar.id) && selected.length >= MAX_ASSIGNMENT_SELECTION) {
+      toast.error(
+        "Une affectation est limitée à 500 barres. Réduisez la sélection avant de continuer.",
+      );
+      return;
+    }
     setSelected((current) =>
-      checked ? [...new Set([...current, barId])] : current.filter((id) => id !== barId),
+      checked ? [...new Set([...current, bar.id])] : current.filter((id) => id !== bar.id),
     );
+    setSelectedBarCache((current) => {
+      if (!checked) {
+        const next = { ...current };
+        delete next[bar.id];
+        return next;
+      }
+      return { ...current, [bar.id]: bar };
+    });
+  };
   const toggleAllVisible = (checked: boolean): void =>
     setSelected((current) =>
       checked
-        ? [...new Set([...current, ...filteredBars.map((bar) => bar.id)])]
-        : current.filter((id) => !filteredBars.some((bar) => bar.id === id)),
+        ? [...new Set([...current, ...availableBars.map((bar) => bar.id)])]
+        : current.filter((id) => !availableBars.some((bar) => bar.id === id)),
     );
+  const toggleVisibleSelection = (checked: boolean): void => {
+    if (
+      checked &&
+      selected.length + availableBars.filter((bar) => !selected.includes(bar.id)).length >
+        MAX_ASSIGNMENT_SELECTION
+    ) {
+      toast.error("Une affectation est limitée à 500 barres. Sélectionnez un lot plus petit.");
+      return;
+    }
+    toggleAllVisible(checked);
+    setSelectedBarCache((current) => {
+      const next = { ...current };
+      for (const bar of availableBars) {
+        if (checked) next[bar.id] = bar;
+        else delete next[bar.id];
+      }
+      return next;
+    });
+  };
+
+  const toggleAllFilteredAvailable = async (): Promise<void> => {
+    if (allSelectedSearch === debouncedSearch && allSelectedAvailableIds.length > 0) {
+      setSelected((current) => current.filter((id) => !allSelectedAvailableIds.includes(id)));
+      setSelectedBarCache((current) => {
+        const next = { ...current };
+        allSelectedAvailableIds.forEach((id) => delete next[id]);
+        return next;
+      });
+      setAllSelectedAvailableIds([]);
+      setAllSelectedSearch(null);
+      return;
+    }
+    setSelectingAllAvailable(true);
+    try {
+      const first = await getOfferBarAssignmentsRequest(offerId, {
+        availablePage: 1,
+        assignmentPage,
+        pageSize: 50,
+        search: debouncedSearch,
+      });
+      const pages: Awaited<ReturnType<typeof getOfferBarAssignmentsRequest>>[] = [];
+      for (let page = 2; page <= first.pagination.available.totalPages; page += 5) {
+        const batch = await Promise.all(
+          Array.from(
+            { length: Math.min(5, first.pagination.available.totalPages - page + 1) },
+            (_, index) =>
+              getOfferBarAssignmentsRequest(offerId, {
+                availablePage: page + index,
+                assignmentPage,
+                pageSize: 50,
+                search: debouncedSearch,
+              }),
+          ),
+        );
+        pages.push(...batch);
+      }
+      const bars = [...first.availableBars, ...pages.flatMap((page) => page.availableBars)];
+      const ids = bars.map((bar) => bar.id);
+      setSelected((current) => [...new Set([...current, ...ids])]);
+      setSelectedBarCache((current) => ({
+        ...current,
+        ...Object.fromEntries(bars.map((bar) => [bar.id, bar])),
+      }));
+      setAllSelectedAvailableIds(ids);
+      setAllSelectedSearch(debouncedSearch);
+      toast.success(
+        `${ids.length} barre(s) disponible(s) sélectionnée(s) dans tous les résultats.`,
+      );
+    } catch (error) {
+      toast.error(localError(error));
+    } finally {
+      setSelectingAllAvailable(false);
+    }
+  };
 
   if (assignmentQuery.isLoading || machinesQuery.isLoading)
     return (
@@ -170,13 +331,13 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
     );
 
   const allVisibleSelected =
-    filteredBars.length > 0 && filteredBars.every((bar) => selected.includes(bar.id));
+    availableBars.length > 0 && availableBars.every((bar) => selected.includes(bar.id));
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-nim-red">
-            Offre · Atelier
+            Affaire · Atelier
           </p>
           <h2 className="mt-1 text-xl font-semibold text-slate-950 dark:text-slate-100">
             Affectation des barres
@@ -198,12 +359,24 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <KpiCard label="Barres disponibles" value={availableBars.length.toLocaleString("fr-FR")} detail="prêtes à être affectées" icon={Scissors} tone="neutral" />
-        <KpiCard label="Barres déjà affectées" value={(assignmentQuery.data?.assignments.length ?? 0).toLocaleString("fr-FR")} detail="sur cette offre" icon={ArrowRightLeft} tone="positive" />
+        <KpiCard
+          label="Barres disponibles"
+          value={(assignmentQuery.data?.availableCount ?? 0).toLocaleString("fr-FR")}
+          detail="prêtes à être affectées"
+          icon={Scissors}
+          tone="neutral"
+        />
+        <KpiCard
+          label="Barres déjà affectées"
+          value={(assignmentQuery.data?.assignmentCount ?? 0).toLocaleString("fr-FR")}
+          detail="sur cette affaire"
+          icon={ArrowRightLeft}
+          tone="positive"
+        />
       </div>
 
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
-        <Card className="overflow-hidden">
+        <Card>
           <CardHeader className="border-b border-slate-200 dark:border-slate-800">
             <CardTitle className="text-base">Barres disponibles</CardTitle>
             <p className="text-xs text-slate-500">
@@ -211,29 +384,31 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
             </p>
           </CardHeader>
           <CardContent className="space-y-3 p-4">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
-              <Input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                className="pl-9 pr-9"
-                placeholder="Rechercher une référence ou un profil…"
-                aria-label="Rechercher une barre disponible"
-              />
-              {search ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 size-8 -translate-y-1/2"
-                  aria-label="Effacer la recherche"
-                  onClick={() => setSearch("")}
-                >
-                  <X className="size-4" />
-                </Button>
-              ) : null}
+            <div className="nim-offer-sticky-table-tools rounded-md py-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  className="pl-9 pr-9"
+                  placeholder="Rechercher une référence ou un profil…"
+                  aria-label="Rechercher une barre disponible"
+                />
+                {search ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1/2 size-8 -translate-y-1/2"
+                    aria-label="Effacer la recherche"
+                    onClick={() => setSearch("")}
+                  >
+                    <X className="size-4" />
+                  </Button>
+                ) : null}
+              </div>
             </div>
-            {availableBars.length === 0 ? (
+            {(assignmentQuery.data?.availableCount ?? 0) === 0 ? (
               <EmptyState
                 title="Aucune barre disponible"
                 description="Validez un plan de façonnage pour créer des barres pouvant être affectées."
@@ -245,7 +420,7 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                   ) : undefined
                 }
               />
-            ) : filteredBars.length === 0 ? (
+            ) : availableBars.length === 0 ? (
               <EmptyState title="Aucun résultat" description="Modifiez votre recherche." />
             ) : (
               <>
@@ -255,15 +430,45 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                       type="checkbox"
                       className="size-4 accent-red-600"
                       checked={allVisibleSelected}
-                      onChange={(event) => toggleAllVisible(event.currentTarget.checked)}
+                      onChange={(event) => toggleVisibleSelection(event.currentTarget.checked)}
+                      disabled={selectingAllAvailable}
                       aria-label="Sélectionner toutes les barres visibles"
                     />
-                    Tout sélectionner ({filteredBars.length})
+                    Sélectionner cette page ({availableBars.length})
                   </label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void toggleAllFilteredAvailable()}
+                    disabled={
+                      selectingAllAvailable ||
+                      search.trim() !== debouncedSearch ||
+                      (assignmentQuery.data?.availableCount ?? 0) > MAX_ASSIGNMENT_SELECTION
+                    }
+                  >
+                    {selectingAllAvailable ? (
+                      <RefreshCw className="size-4 animate-spin" />
+                    ) : (
+                      <Check className="size-4" />
+                    )}
+                    {selectingAllAvailable
+                      ? "Chargement des résultats…"
+                      : allSelectedSearch === debouncedSearch && allSelectedAvailableIds.length > 0
+                        ? `Désélectionner les ${allSelectedAvailableIds.length} résultats`
+                        : (assignmentQuery.data?.availableCount ?? 0) > MAX_ASSIGNMENT_SELECTION
+                          ? `Filtrez à ${MAX_ASSIGNMENT_SELECTION} barres maximum`
+                          : `Tout sélectionner (${assignmentQuery.data?.availableCount ?? 0} résultats)`}
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelected([])}
+                    onClick={() => {
+                      setSelected([]);
+                      setSelectedBarCache({});
+                      setAllSelectedAvailableIds([]);
+                      setAllSelectedSearch(null);
+                    }}
                     disabled={selected.length === 0}
                   >
                     <X className="size-4" />
@@ -271,7 +476,7 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                   </Button>
                 </div>
                 <div className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
-                  {filteredBars.map((bar) => (
+                  {availableBars.map((bar) => (
                     <label
                       key={bar.id}
                       className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${selected.includes(bar.id) ? "border-nim-red/40 bg-red-50/60 dark:bg-red-950/20" : "border-slate-200 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-900"}`}
@@ -280,7 +485,7 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                         type="checkbox"
                         className="size-4 accent-red-600"
                         checked={selected.includes(bar.id)}
-                        onChange={(event) => toggleBar(bar.id, event.currentTarget.checked)}
+                        onChange={(event) => toggleBar(bar, event.currentTarget.checked)}
                         aria-label={`Sélectionner ${bar.reference}`}
                       />
                       <span className="min-w-0 flex-1">
@@ -296,6 +501,18 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                     </label>
                   ))}
                 </div>
+                {assignmentQuery.data?.pagination?.available ? (
+                  <Pagination
+                    page={assignmentQuery.data.pagination.available.page}
+                    pageCount={assignmentQuery.data.pagination.available.totalPages}
+                    pageSize={pageSize}
+                    total={assignmentQuery.data.pagination.available.total}
+                    pageSizes={[10, 20, 50]}
+                    itemLabel="barre disponible"
+                    onPageChange={setAvailablePage}
+                    onPageSizeChange={setPageSize}
+                  />
+                ) : null}
               </>
             )}
           </CardContent>
@@ -333,12 +550,10 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
                       {selectedMachine.type} · {selectedMachine.internalNumber}
                     </p>
                   </div>
-                  <Badge variant="outline" className="text-emerald-700">
-                    Active
-                  </Badge>
+                  <StatusBadge tone="active">Active</StatusBadge>
                 </div>
                 <p className="mt-3 text-xs text-slate-500">
-                  {machineBars.length} barre(s) déjà affectée(s) à cette machine pour cette offre.
+                  {machineBars} barre(s) déjà affectée(s) à cette machine pour cette affaire.
                 </p>
                 <Button variant="link" size="sm" className="h-auto p-0" asChild>
                   <Link href={`/machines/${selectedMachine.id}`}>
@@ -393,7 +608,7 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
         </Card>
       </div>
 
-      <Card className="overflow-hidden">
+      <Card>
         <CardHeader className="border-b border-slate-200 dark:border-slate-800">
           <CardTitle className="text-base">Affectations existantes</CardTitle>
           <p className="text-xs text-slate-500">
@@ -401,7 +616,7 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
           </p>
         </CardHeader>
         <CardContent className="p-4">
-          {(assignmentQuery.data?.assignments.length ?? 0) === 0 ? (
+          {(assignmentQuery.data?.assignmentCount ?? 0) === 0 ? (
             <EmptyState
               title="Aucune affectation"
               description="Les barres déjà affectées aux machines apparaîtront ici."
@@ -449,6 +664,18 @@ export function OfferBarAssignmentsView({ offerId }: { offerId: string }): React
               ))}
             </div>
           )}
+          {(assignmentQuery.data?.pagination?.assignments?.total ?? 0) > 0 ? (
+            <Pagination
+              page={assignmentQuery.data?.pagination?.assignments?.page ?? assignmentPage}
+              pageCount={assignmentQuery.data?.pagination?.assignments?.totalPages ?? 1}
+              pageSize={pageSize}
+              total={assignmentQuery.data?.pagination?.assignments?.total ?? 0}
+              pageSizes={[10, 20, 50]}
+              itemLabel="affectation"
+              onPageChange={setAssignmentPage}
+              onPageSizeChange={setPageSize}
+            />
+          ) : null}
         </CardContent>
       </Card>
 

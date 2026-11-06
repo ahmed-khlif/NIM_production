@@ -199,6 +199,47 @@ select {
   }
 }
 
+@keyframes nim-login-enter {
+  from { opacity: 0.94; transform: translate3d(0, 10px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes nim-login-glow-drift {
+  0%, 100% { opacity: 0.42; transform: translate3d(0, 0, 0) scale(1); }
+  50% { opacity: 0.68; transform: translate3d(-12px, 10px, 0) scale(1.04); }
+}
+
+@keyframes nim-login-signal {
+  0%, 100% { opacity: 0.35; transform: translateX(0); }
+  50% { opacity: 1; transform: translateX(44px); }
+}
+
+.nim-login-enter {
+  animation: nim-login-enter 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.nim-login-enter-delay-1 { animation-delay: 70ms; }
+.nim-login-enter-delay-2 { animation-delay: 140ms; }
+.nim-login-enter-delay-3 { animation-delay: 210ms; }
+
+.nim-login-glow {
+  animation: nim-login-glow-drift 16s ease-in-out infinite;
+}
+
+.nim-login-signal {
+  animation: nim-login-signal 3.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nim-login-enter,
+  .nim-login-glow,
+  .nim-login-signal {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -210,12 +251,150 @@ select {
 }
 
 /* User preference: compact data density. Keep forms/touch targets unchanged. */
-html[data-density="compact"] table thead th {
+html[data-density="compact"] table.nim-data-table thead th {
   padding-top: 0.5rem !important;
   padding-bottom: 0.5rem !important;
 }
 
-html[data-density="compact"] table tbody td {
+html[data-density="compact"] table.nim-data-table tbody td {
   padding-top: 0.5rem !important;
   padding-bottom: 0.5rem !important;
+}
+
+/* Keeps list controls visible while scrolling the shared application viewport. */
+.nim-sticky-table-tools {
+  position: sticky;
+  top: 76px;
+  z-index: 20;
+  background-color: hsl(var(--background) / 0.96);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+/* Affaire tabs remain pinned below the app header; their filters stack beneath them. */
+.nim-offer-sticky-table-tools {
+  position: sticky;
+  top: calc(76px + var(--nim-offer-workspace-header-height, 176px));
+  z-index: 20;
+  background-color: hsl(var(--background) / 0.97);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+/* The operator tablet has its own 64px header instead of the manager app bar. */
+.nim-tablet-sticky-tools {
+  position: sticky;
+  top: 64px;
+  z-index: 20;
+  background-color: hsl(var(--background) / 0.97);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+/* Common data-table rhythm: strong column labels, calm zebra rows, clear hover. */
+table.nim-data-table thead th {
+  background-color: hsl(var(--muted)) !important;
+  color: hsl(var(--foreground) / 0.82) !important;
+  font-weight: 650;
+  padding-block: 0.75rem !important;
+  text-align: left;
+  vertical-align: middle;
+}
+
+/* Every data-table column exposes the same quiet sort affordance as the reference UI. */
+table.nim-data-table thead th:not([data-sortable="false"])::after {
+  display: inline-block;
+  margin-left: 0.45rem;
+  color: hsl(var(--muted-foreground) / 0.82);
+  content: "↕";
+  font-size: 0.9rem;
+  font-weight: 500;
+  line-height: 1;
+  transform: translateY(-0.02em);
+  transition: color 150ms ease, transform 150ms ease;
+}
+
+table.nim-data-table thead th:not([data-sortable="false"]):hover::after {
+  color: hsl(var(--foreground));
+  transform: translateY(-0.02em) scale(1.08);
+}
+
+table.nim-data-table thead th[data-sort-direction="asc"]::after {
+  color: hsl(var(--primary));
+  content: "↑";
+}
+
+table.nim-data-table thead th[data-sort-direction="desc"]::after {
+  color: hsl(var(--primary));
+  content: "↓";
+}
+
+table.nim-data-table thead th:has(.nim-table-sort-button) {
+  padding: 0 !important;
+}
+
+table.nim-data-table thead th:has(.nim-table-sort-button)::after {
+  display: none;
+}
+
+.nim-table-heading-content {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.nim-table-sort-icon {
+  color: hsl(var(--muted-foreground) / 0.82);
+  flex: 0 0 auto;
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
+.nim-table-sort-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  justify-content: flex-start;
+  min-height: 2.75rem;
+  padding: 0.75rem 1rem;
+  text-align: inherit;
+  width: 100%;
+}
+
+.nim-table-sort-button:hover,
+.nim-table-sort-button:focus-visible {
+  background: hsl(var(--accent) / 0.7);
+}
+
+table.nim-data-table th.text-right .nim-table-heading-content {
+  justify-content: flex-end;
+}
+
+table.nim-data-table td {
+  vertical-align: middle;
+}
+
+table.nim-data-table thead th[data-sortable="false"]::after {
+  display: none;
+}
+
+table.nim-data-table tbody tr:nth-child(even) {
+  background-color: hsl(var(--muted) / 0.38);
+}
+
+table.nim-data-table tbody tr:hover {
+  background-color: hsl(var(--accent) / 0.9) !important;
+}
+
+table.nim-data-table tbody td {
+  line-height: 1.45;
+}
+
+html:not([data-density="compact"]) table.nim-data-table tbody td {
+  padding-block: 0.8rem !important;
 }

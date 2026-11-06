@@ -2,17 +2,18 @@
 
 import type { PiecePriority, PieceStatus } from "@nim/types";
 import { useQuery } from "@tanstack/react-query";
-import { addDays, format, getDay, parse, startOfWeek } from "date-fns";
+import { addDays, endOfMonth, format, getDay, parse, startOfMonth, startOfWeek } from "date-fns";
 import { fr } from "date-fns/locale/fr";
 import { CalendarDays, Filter, RefreshCw, RotateCcw } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Calendar, dateFnsLocalizer, type EventProps } from "react-big-calendar";
 import { AccessDenied } from "@/components/access/access-denied";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -24,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import {
   ApiError,
-  getAllPiecesRequest,
+  getPlanningPiecesRequest,
   type ManagedPieceListItem,
 } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
@@ -84,9 +85,24 @@ export function PlanningCalendarView(): React.ReactNode {
   const canRead = Boolean(user && ["ADMIN", "PRODUCTION_MANAGER"].includes(user.role));
   const [statusFilter, setStatusFilter] = useState<PieceStatus | "ALL">("ALL");
   const [priorityFilter, setPriorityFilter] = useState<PiecePriority | "ALL">("ALL");
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [visibleRange, setVisibleRange] = useState(() => ({ start: startOfMonth(new Date()), end: endOfMonth(new Date()) }));
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  const dueDateFrom = visibleRange.start.toISOString();
+  const dueDateTo = visibleRange.end.toISOString();
   const query = useQuery({
-    queryKey: ["pieces", "planning"],
-    queryFn: getAllPiecesRequest,
+    queryKey: ["pieces", "planning", dueDateFrom, dueDateTo, debouncedSearch, statusFilter, priorityFilter],
+    queryFn: () => getPlanningPiecesRequest({
+      dueDateFrom,
+      dueDateTo,
+      search: debouncedSearch,
+      priority: priorityFilter === "ALL" ? undefined : priorityFilter,
+      status: statusFilter === "ALL" || statusFilter === "DELAYED" ? undefined : statusFilter,
+    }),
     enabled: canRead,
     retry: false,
   });
@@ -97,10 +113,9 @@ export function PlanningCalendarView(): React.ReactNode {
       pieces.filter(
         (piece) =>
           piece.dueDate &&
-          (statusFilter === "ALL" || piece.status === statusFilter) &&
-          (priorityFilter === "ALL" || piece.priority === priorityFilter),
+          (statusFilter === "ALL" || piece.status === statusFilter),
       ),
-    [pieces, priorityFilter, statusFilter],
+    [pieces, statusFilter],
   );
   const events: PlanningEvent[] = scheduledPieces.map((piece) => {
     const start = dueDateAsLocalDay(piece.dueDate as string);
@@ -169,12 +184,13 @@ export function PlanningCalendarView(): React.ReactNode {
         }
       />
 
-      <Card>
+      <Card className="nim-sticky-table-tools">
         <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
           <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
             <Filter className="size-4 text-slate-400" />
             Filtres
           </div>
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher une pièce ou un profil" aria-label="Rechercher dans le planning" className="w-full sm:max-w-xs" />
           <Select
             value={statusFilter}
             onValueChange={(value) => setStatusFilter(value as PieceStatus | "ALL")}
@@ -252,6 +268,12 @@ export function PlanningCalendarView(): React.ReactNode {
                 popup
                 views={["month", "week", "agenda"]}
                 defaultView="month"
+                onRangeChange={(range) => {
+                  const values = Array.isArray(range) ? range : [range.start, range.end];
+                  const start = values.reduce((left, right) => left < right ? left : right);
+                  const end = values.reduce((left, right) => left > right ? left : right);
+                  setVisibleRange({ start, end });
+                }}
                 messages={{
                   next: "Suivant",
                   previous: "Précédent",

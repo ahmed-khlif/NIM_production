@@ -38,12 +38,15 @@ import {
   getOfferRequest,
   getOfferBarSummaryRequest,
   getOfferProductionSummaryRequest,
+  overrideOfferStatusRequest,
   updateOfferRequest,
   type ManagedOffer,
+  type OfferStatus,
 } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
 import { OfferFormSheet, type OfferFormValue } from "./offer-form-sheet";
-import { formatDateTime } from "./offer-ui";
+import { formatDateTime, offerStatusLabels } from "./offer-ui";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 function message(error: unknown): string {
   return error instanceof ApiError ? error.message : "Une erreur est survenue.";
@@ -53,9 +56,11 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canManage = user?.role === "ADMIN" || user?.role === "PRODUCTION_MANAGER";
+  const isAdmin = user?.role === "ADMIN";
   const [editOpen, setEditOpen] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
-  const [lifecycleTarget, setLifecycleTarget] = useState<"DRAFT" | "COMPLETED" | null>(null);
+  const [lifecycleTarget, setLifecycleTarget] = useState<"DRAFT" | "READY" | "COMPLETED" | null>(null);
+  const [adminStatusTarget, setAdminStatusTarget] = useState<Exclude<OfferStatus, "ARCHIVED"> | null>(null);
   const offerQuery = useQuery({
     queryKey: ["offer", offerId],
     queryFn: () => getOfferRequest(offerId),
@@ -76,7 +81,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
       updateOfferRequest(offerId, {
         revision: value.revision,
         name: value.name,
-        clientName: value.clientName,
+        clientId: value.clientId,
         site: value.site,
         description: value.description,
       }),
@@ -87,12 +92,12 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
       ]);
       setEditOpen(false);
       setEditError(null);
-      toast.success("Offre mise à jour.");
+      toast.success("Affaire mise à jour.");
     },
     onError: (error) => setEditError(message(error)),
   });
   const lifecycleMutation = useMutation({
-    mutationFn: (status: "DRAFT" | "COMPLETED") => updateOfferRequest(offerId, { status }),
+    mutationFn: (status: "DRAFT" | "READY" | "COMPLETED") => updateOfferRequest(offerId, { status }),
     onSuccess: async (_, status) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["offer", offerId] }),
@@ -100,11 +105,24 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
         queryClient.invalidateQueries({ queryKey: ["offer", offerId, "production-summary"] }),
       ]);
       setLifecycleTarget(null);
-      toast.success(status === "DRAFT" ? "Offre repassée en brouillon." : "Offre terminée.");
+      toast.success(status === "DRAFT" ? "Affaire repassée en brouillon." : status === "READY" ? "Affaire marquée prête." : "Affaire terminée.");
     },
     onError: (error) => toast.error(message(error)),
   });
-
+  const adminStatusMutation = useMutation({
+    mutationFn: (status: Exclude<OfferStatus, "ARCHIVED">) => overrideOfferStatusRequest(offerId, status),
+    onSuccess: async (_, status) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["offer", offerId] }),
+        queryClient.invalidateQueries({ queryKey: ["offers"] }),
+        queryClient.invalidateQueries({ queryKey: ["offer", offerId, "production-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["offer", offerId, "bar-summary"] }),
+      ]);
+      setAdminStatusTarget(null);
+      toast.success(`Statut de l’affaire mis à jour : ${offerStatusLabels[status]}.`);
+    },
+    onError: (error) => toast.error(message(error)),
+  });
   if (offerQuery.isLoading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -125,10 +143,13 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
   }
   const offer = offerQuery.data.offer;
   const active = offer.status !== "ARCHIVED";
+  const hasApprovedPlan = offer.cuttingPlans.some((plan) =>
+    ["APPROVED", "PARTIALLY_VALIDATED", "VALIDATED"].includes(plan.status),
+  );
   const nextStep =
     offer.status === "ARCHIVED"
       ? {
-          title: "Offre archivée",
+          title: "Affaire archivée",
           description: "Les données sont conservées en lecture seule.",
           href: `/offers/${offerId}`,
           label: "Consulter",
@@ -137,7 +158,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
       : offer.totalUnits === 0
         ? {
             title: "Ajouter les pièces",
-            description: "Saisissez les pièces ou importez la liste Tekla propre à cette offre.",
+            description: "Saisissez les pièces ou importez la liste Tekla propre à cette affaire.",
             href: `/offers/${offerId}/pieces`,
             label: "Ouvrir les pièces",
             icon: Box,
@@ -157,7 +178,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
                   title: canManage ? "Affecter les barres" : "Consulter les barres",
                   description: canManage
                     ? "Le plan est validé. Sélectionnez les barres façonnées puis confirmez leur machine de destination."
-                    : "Consultez les barres façonnées, leur statut et leur machine dans le détail de cette offre.",
+                    : "Consultez les barres façonnées, leur statut et leur machine dans le détail de cette affaire.",
                   href: canManage
                     ? `/offers/${offerId}/bar-assignments`
                     : `/offers/${offerId}/bars`,
@@ -188,7 +209,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
               ? {
                   title: "Suivre la production",
                   description:
-                    "La fabrication a démarré. Suivez les unités, les opérations et le contrôle qualité de cette offre.",
+                    "La fabrication a démarré. Suivez les unités, les opérations et le contrôle qualité de cette affaire.",
                   href: `/offers/${offerId}/production`,
                   label: "Suivre la production",
                   icon: Factory,
@@ -209,12 +230,46 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
         <div>
           <h2 className="text-xl font-semibold text-slate-950 dark:text-slate-100">Vue générale</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Synthèse de l’offre et accès direct à son flux de préparation.
+            Synthèse de l’affaire et accès direct à son flux de préparation.
           </p>
+          <p className="mt-2 text-xs font-medium text-slate-500">Statut de l’affaire : <span className="text-slate-900 dark:text-slate-100">{offerStatusLabels[offer.status]}</span></p>
+          {isAdmin && active ? (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Modifier le statut</span>
+              <Select
+                value={offer.status}
+                onValueChange={(value) => {
+                  const nextStatus = value as Exclude<OfferStatus, "ARCHIVED">;
+                  if (nextStatus !== offer.status) setAdminStatusTarget(nextStatus);
+                }}
+                disabled={adminStatusMutation.isPending}
+              >
+                <SelectTrigger className="h-9 w-52" aria-label="Modifier le statut de l’affaire">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(["DRAFT", "READY", "IN_PRODUCTION", "COMPLETED"] as const).map((status) => (
+                    <SelectItem key={status} value={status}>{offerStatusLabels[status]}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="max-w-xl text-xs text-slate-500">Le changement de statut ne réinitialise aucune donnée de production ou de qualité.</span>
+            </div>
+          ) : null}
         </div>
         {canManage && active ? (
           <div className="flex flex-wrap gap-2">
-            {offer.status === "READY" ? (
+            {user?.role === "PRODUCTION_MANAGER" && offer.status === "DRAFT" ? (
+              <Button
+                variant="outline"
+                onClick={() => setLifecycleTarget("READY")}
+                disabled={!hasApprovedPlan}
+                title={!hasApprovedPlan ? "Validez d’abord un plan de mise en barres." : undefined}
+              >
+                Marquer prête
+              </Button>
+            ) : null}
+            {user?.role === "PRODUCTION_MANAGER" && offer.status === "READY" ? (
               <>
                 <Button
                   variant="outline"
@@ -232,16 +287,30 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
                 ) : null}
               </>
             ) : null}
-            {offer.status === "IN_PRODUCTION" ? (
-              <Button onClick={() => setLifecycleTarget("COMPLETED")}>Terminer l’offre</Button>
+            {canManage && (offer.status === "DRAFT" || offer.status === "READY") && hasApprovedPlan ? (
+              <Button variant="outline" asChild>
+                <Link href={`/offers/${offerId}/faconnage#saved-plans`}>
+                  <Scissors className="size-4" />
+                  Revenir à la validation du plan
+                </Link>
+              </Button>
+            ) : null}
+            {user?.role === "PRODUCTION_MANAGER" && offer.status === "IN_PRODUCTION" ? (
+              <Button onClick={() => setLifecycleTarget("COMPLETED")}>Terminer l’affaire</Button>
             ) : null}
             <Button variant="outline" onClick={() => setEditOpen(true)}>
               <Pencil className="size-4" />
-              Modifier l’offre
+              Modifier l’affaire
             </Button>
           </div>
         ) : null}
       </div>
+
+      {canManage && active && !isAdmin ? (
+        <p className="text-xs text-slate-500">
+          Le passage en production est déclenché par le premier lancement opérateur. La clôture reste disponible après fabrication et résolution qualité de toutes les pièces.
+        </p>
+      ) : null}
 
       <Card className="overflow-hidden border-slate-200 shadow-panel dark:border-slate-800">
         <CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
@@ -290,7 +359,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
             <div className="grid grid-cols-2 gap-3 md:grid-cols-5">{Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-[74px]" />)}</div>
           ) : productionQuery.isError || barsQuery.isError ? (
             <div className="flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50/70 p-4 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between dark:border-red-950 dark:bg-red-950/20 dark:text-red-200">
-              <span>Le détail du flux n’a pas pu être chargé. La progression globale reste basée sur les unités de l’offre.</span>
+              <span>Le détail du flux n’a pas pu être chargé. La progression globale reste basée sur les unités de l’affaire.</span>
               <Button size="sm" variant="outline" onClick={() => { void productionQuery.refetch(); void barsQuery.refetch(); }}>Réessayer</Button>
             </div>
           ) : (
@@ -325,8 +394,8 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
         <Card className="border-slate-200 shadow-panel dark:border-slate-800">
           <CardContent className="p-8">
             <EmptyState
-              title="Aucune pièce pour cette offre"
-              description="Commencez par ajouter des pièces manuellement ou importer la liste Tekla de cette offre."
+              title="Aucune pièce pour cette affaire"
+              description="Commencez par ajouter des pièces manuellement ou importer la liste Tekla de cette affaire."
               action={
                 active && canManage ? (
                   <div className="flex flex-wrap justify-center gap-2">
@@ -349,33 +418,7 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
-          <Card className="border-slate-200 shadow-panel dark:border-slate-800">
-            <CardHeader className="flex-row items-center justify-between border-b border-slate-200 dark:border-slate-800">
-              <CardTitle className="text-base">Derniers imports</CardTitle>
-              <Button variant="ghost" size="sm" asChild>
-                <Link href={`/offers/${offerId}/pieces/import`}>Importer</Link>
-              </Button>
-            </CardHeader>
-            <CardContent className="divide-y divide-slate-100 p-0 dark:divide-slate-800">
-              {offer.recentImports.length ? (
-                offer.recentImports.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between gap-3 px-5 py-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{item.filename}</p>
-                      <p className="text-xs text-slate-400">{formatDateTime(item.createdAt)}</p>
-                    </div>
-                    <span className="text-xs font-semibold text-slate-500">
-                      {item.rowsCreated} pièce(s)
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <p className="p-5 text-sm text-slate-500">Aucun import.</p>
-              )}
-            </CardContent>
-          </Card>
-
+        <div className="grid gap-4">
           <Card className="border-slate-200 shadow-panel dark:border-slate-800">
             <CardHeader className="flex-row items-center justify-between border-b border-slate-200 dark:border-slate-800">
               <CardTitle className="text-base">Plans de mise en barres</CardTitle>
@@ -415,13 +458,17 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
           <AlertDialogHeader>
             <AlertDialogTitle>
               {lifecycleTarget === "DRAFT"
-                ? "Repasser cette offre en brouillon ?"
-                : "Terminer cette offre ?"}
+                ? "Repasser cette affaire en brouillon ?"
+                : lifecycleTarget === "READY"
+                  ? "Marquer cette affaire comme prête ?"
+                  : "Terminer cette affaire ?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {lifecycleTarget === "DRAFT"
-                ? "Le plan approuvé sera archivé. Les pièces redeviendront modifiables après annulation des barres façonnées; toute affectation active doit d’abord être retirée. L’historique des barres reste conservé."
-                : "La clôture est autorisée uniquement lorsque toutes les unités ont terminé la fabrication et que chaque contrôle qualité est résolu."}
+                ? "Le plan approuvé sera archivé. Les barres façonnées doivent d’abord être annulées et les affectations retirées; l’historique reste conservé."
+                : lifecycleTarget === "READY"
+                  ? "Un plan de mise en barres validé est requis. Les pièces encore en attente restent modifiables; les pièces déjà façonnées ou engagées gardent leur traçabilité."
+                  : "La clôture est autorisée uniquement lorsque toutes les unités ont terminé la fabrication et que chaque contrôle qualité est résolu."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -432,6 +479,32 @@ export function OfferOverviewView({ offerId }: { offerId: string }): React.React
             >
               {lifecycleMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
               Confirmer
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={Boolean(adminStatusTarget)}
+        onOpenChange={(open) => !open && !adminStatusMutation.isPending && setAdminStatusTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirmer le changement de statut ?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {offerStatusLabels[offer.status]} → {adminStatusTarget ? offerStatusLabels[adminStatusTarget] : ""}. Cette action modifie uniquement le statut de l’affaire. Elle ne réinitialise ni les barres, affectations, fabrications, non-conformités, validations qualité ni l’historique. Le statut affiché peut donc ne pas refléter l’avancement réel de l’atelier.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={adminStatusMutation.isPending}>Annuler</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={adminStatusMutation.isPending || !adminStatusTarget}
+              onClick={(event) => {
+                event.preventDefault();
+                if (adminStatusTarget) adminStatusMutation.mutate(adminStatusTarget);
+              }}
+            >
+              {adminStatusMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
+              Confirmer le statut
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

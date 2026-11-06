@@ -8,18 +8,13 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { roleLabels } from "@/components/ui/role-badge";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAuth } from "@/features/auth/auth-provider";
+import { visibleOfferWorkspaceNavigation } from "@/features/offers/offer-workspace-navigation";
 import { NimLogo } from "../brand/nim-logo";
 import { visibleNavigationItems } from "./navigation-config";
-
-const roleLabels: Record<UserRole, string> = {
-  ADMIN: "Administrateur",
-  PRODUCTION_MANAGER: "Responsable production",
-  OPERATOR: "Opérateur",
-  QUALITY_CONTROLLER: "Contrôleur qualité",
-};
 
 function initials(displayName: string): string {
   return displayName
@@ -42,6 +37,10 @@ function NavigationLinks({
   const items = visibleNavigationItems(role);
   const main = items.filter((item) => item.section === "main");
   const admin = items.filter((item) => item.section === "admin");
+  const offerMatch = pathname.match(/^\/offers\/([^/]+)/);
+  const offerId = offerMatch?.[1];
+  const offerBase = offerId ? `/offers/${offerId}` : null;
+  const offerTabs = offerBase ? visibleOfferWorkspaceNavigation(role) : [];
 
   const renderItems = (group: typeof items): React.ReactNode =>
     group.map(({ label, href, icon: Icon }) => {
@@ -50,25 +49,60 @@ function NavigationLinks({
         normalizedHref === "/offers"
           ? pathname === "/offers" || pathname.startsWith("/offers/")
           : pathname === normalizedHref || pathname.startsWith(`${normalizedHref}/`);
+      const isOfferItem = normalizedHref === "/offers";
       return (
-        <Link
-          key={`${label}-${href}`}
-          href={href}
-          onClick={onNavigate}
-          aria-current={active ? "page" : undefined}
-          className={cn(
-            "group relative flex min-h-10 items-center gap-3 rounded-md px-3 text-sm text-slate-400 transition-colors hover:bg-white/[0.07] hover:text-white",
-            active && "bg-nim-red font-semibold text-white shadow-sm hover:bg-nim-red/90",
-          )}
-        >
-          <Icon
+        <div key={`${label}-${href}`} className="space-y-1">
+          <Link
+            href={href}
+            onClick={onNavigate}
+            aria-current={active ? "page" : undefined}
             className={cn(
-              "size-[17px] shrink-0 transition-colors",
-              active ? "text-white" : "text-slate-500 group-hover:text-white",
+              "group relative flex min-h-10 items-center gap-3 rounded-md px-3 text-sm text-slate-400 transition-colors hover:bg-white/[0.07] hover:text-white",
+              active && "bg-nim-red font-semibold text-white shadow-sm hover:bg-nim-red/90",
             )}
-          />
-          <span>{label}</span>
-        </Link>
+          >
+            <Icon
+              className={cn(
+                "size-[17px] shrink-0 transition-colors",
+                active ? "text-white" : "text-slate-500 group-hover:text-white",
+              )}
+            />
+            <span>{label}</span>
+          </Link>
+          {isOfferItem && offerBase ? (
+            <div className="ml-5 space-y-0.5 border-l border-white/[0.12] py-1 pl-2">
+              <p className="px-2 pb-1 pt-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-600">
+                Espace de l’affaire
+              </p>
+              {offerTabs.map(({ key, label: tabLabel, icon: TabIcon, suffix }) => {
+                const tabHref = `${offerBase}${suffix}`;
+                const tabActive = key === "overview"
+                  ? pathname === offerBase
+                  : pathname === tabHref || pathname.startsWith(`${tabHref}/`);
+                return (
+                  <Link
+                    key={key}
+                    href={tabHref}
+                    onClick={onNavigate}
+                    aria-current={tabActive ? "page" : undefined}
+                    className={cn(
+                      "flex min-h-9 items-center gap-2 rounded-md px-2 text-xs transition-colors hover:bg-white/[0.07] hover:text-white",
+                      tabActive ? "bg-white/[0.1] font-semibold text-white" : "text-slate-400",
+                    )}
+                  >
+                    <TabIcon
+                      className={cn(
+                        "size-3.5 shrink-0",
+                        tabActive ? "text-nim-red" : "text-slate-500",
+                      )}
+                    />
+                    <span className="truncate">{tabLabel}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
       );
     });
 

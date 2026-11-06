@@ -1,7 +1,7 @@
 "use client";
 
 import { Archive, CheckCircle2, CircleDot, Clock3, FileCheck2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import type { OfferStatus } from "@/features/auth/auth-client";
 
 export const offerStatusLabels: Record<OfferStatus, string> = {
@@ -13,12 +13,12 @@ export const offerStatusLabels: Record<OfferStatus, string> = {
 };
 
 export function OfferStatusBadge({ status }: { status: OfferStatus }): React.ReactNode {
-  const classes: Record<OfferStatus, string> = {
-    DRAFT: "border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300",
-    READY: "border-slate-300 bg-white text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100",
-    IN_PRODUCTION: "border-red-200 bg-red-50 text-red-700 dark:border-red-950 dark:bg-red-950/30 dark:text-red-300",
-    COMPLETED: "border-slate-800 bg-slate-900 text-white dark:border-slate-600 dark:bg-slate-100 dark:text-slate-950",
-    ARCHIVED: "border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500",
+  const tones: Record<OfferStatus, "neutral" | "info" | "warning" | "active"> = {
+    DRAFT: "neutral",
+    READY: "info",
+    IN_PRODUCTION: "warning",
+    COMPLETED: "active",
+    ARCHIVED: "neutral",
   };
   const icons: Record<OfferStatus, React.ComponentType<{ className?: string }>> = {
     DRAFT: CircleDot,
@@ -29,10 +29,10 @@ export function OfferStatusBadge({ status }: { status: OfferStatus }): React.Rea
   };
   const Icon = icons[status];
   return (
-    <Badge variant="outline" className={classes[status]}>
+    <StatusBadge tone={tones[status]}>
       <Icon className="size-3" />
       {offerStatusLabels[status]}
-    </Badge>
+    </StatusBadge>
   );
 }
 

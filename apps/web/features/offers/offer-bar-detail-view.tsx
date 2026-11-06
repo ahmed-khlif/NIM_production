@@ -1,5 +1,6 @@
 "use client";
 
+import { Table } from "@/components/ui/table";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Factory, RefreshCw, Scissors } from "lucide-react";
 import Link from "next/link";
@@ -9,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 import { ApiError, getOfferBarRequest } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
 import { CuttingBarStatusBadge } from "./offer-bar-ui";
@@ -69,7 +71,7 @@ export function OfferBarDetailView(): React.ReactNode {
     return (
       <EmptyState
         title="Barre introuvable"
-        description="Cette barre ne fait pas partie de l’offre sélectionnée."
+        description="Cette barre ne fait pas partie de l’affaire sélectionnée."
       />
     );
   const activeItems = bar.items.filter((item) => item.active);
@@ -77,13 +79,13 @@ export function OfferBarDetailView(): React.ReactNode {
 
   return (
     <div className="space-y-5">
-      <Link
+      <ReturnLink
         href={`/offers/${offerId}/bars`}
         className="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-nim-red"
       >
         <ArrowLeft className="size-4" />
         Retour aux barres
-      </Link>
+      </ReturnLink>
       <PageHeader
         eyebrow={`${bar.offerReference} · ${bar.profile}`}
         title={bar.reference}
@@ -192,7 +194,7 @@ export function OfferBarDetailView(): React.ReactNode {
           ) : (
             <>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table className="nim-data-table w-full text-left text-sm">
                   <caption className="sr-only">Pièces découpées dans {bar.reference}</caption>
                   <thead className="border-b text-[11px] uppercase tracking-wide text-slate-400">
                     <tr>
@@ -229,7 +231,7 @@ export function OfferBarDetailView(): React.ReactNode {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
                 {activeItems.map((item) => (

@@ -1,9 +1,9 @@
 "use client";
 
+import { Table } from "@/components/ui/table";
 import type {
   ManagedHistoryEvent,
   PieceDetail,
-  PiecePriority,
   PieceStatus,
   PieceUnitStatus,
 } from "@nim/types";
@@ -18,7 +18,6 @@ import {
   RefreshCw,
   UserRound,
 } from "lucide-react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   ApiError,
@@ -35,7 +34,9 @@ import { PageHeader } from "@/components/ui/page-header";
 import { ProductionProgress } from "@/components/ui/production-progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PriorityBadge } from "@/components/ui/priority-badge";
 import { PieceImageGallery } from "@/features/pieces/piece-image-gallery";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 
 const statusLabels: Record<PieceStatus, string> = {
   PLANNED: "Planifiée",
@@ -46,17 +47,12 @@ const statusLabels: Record<PieceStatus, string> = {
   ARCHIVED: "Archivée",
 };
 const statusTones: Record<PieceStatus, "active" | "info" | "warning" | "danger" | "neutral"> = {
-  PLANNED: "info",
-  ASSIGNED: "warning",
+  PLANNED: "neutral",
+  ASSIGNED: "info",
   IN_PROGRESS: "warning",
   COMPLETED: "active",
   DELAYED: "danger",
   ARCHIVED: "neutral",
-};
-const priorityLabels: Record<PiecePriority, string> = {
-  HIGH: "Haute",
-  NORMAL: "Normale",
-  LOW: "Basse",
 };
 const unitStatusLabels: Record<PieceUnitStatus, string> = {
   PENDING: "En attente",
@@ -228,13 +224,13 @@ export function PieceDetailView({ offerId }: { offerId?: string } = {}): React.R
 
   return (
     <div className="space-y-6">
-      <Link
+      <ReturnLink
         href={piecesHref}
         className="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-nim-red"
       >
         <ArrowLeft className="size-4" />
         Retour aux pièces
-      </Link>
+      </ReturnLink>
       <PageHeader
         eyebrow="Traçabilité production"
         title={piece.reference}
@@ -281,9 +277,7 @@ export function PieceDetailView({ offerId }: { offerId?: string } = {}): React.R
         <Card>
           <CardContent className="p-4">
             <p className="text-xs text-slate-500">Priorité</p>
-            <p className="mt-2 text-2xl font-semibold text-slate-950">
-              {priorityLabels[piece.priority]}
-            </p>
+            <div className="mt-2"><PriorityBadge priority={piece.priority} prefix /></div>
             <p className="mt-1 text-xs text-slate-500">
               {piece.unitWeightKg === null
                 ? "Poids non renseigné"
@@ -311,7 +305,7 @@ export function PieceDetailView({ offerId }: { offerId?: string } = {}): React.R
           </CardHeader>
           <CardContent className="p-0">
             <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm">
+              <Table className="nim-data-table w-full text-left text-sm">
                 <caption className="sr-only">Unités traçables de {piece.reference}</caption>
                 <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                   <tr>
@@ -348,7 +342,7 @@ export function PieceDetailView({ offerId }: { offerId?: string } = {}): React.R
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             </div>
             <div className="space-y-3 p-4 md:hidden">
               {piece.units.map((unit) => (

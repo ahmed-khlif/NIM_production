@@ -9,12 +9,14 @@ import {
   Clock3,
   Flag,
   Loader2,
+  RotateCcw,
   ShieldAlert,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,21 +28,23 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   ApiError,
   finishTabletRunRequest,
+  cancelTabletRunRequest,
   getCurrentTabletOperatorRequest,
   getTabletRunRequest,
   reportTabletNonConformityRequest,
@@ -70,6 +74,7 @@ export function OperatorTabletRunView(): React.ReactNode {
   const queryClient = useQueryClient();
   const [now, setNow] = useState(Date.now());
   const [finishOpen, setFinishOpen] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [pieceUnitId, setPieceUnitId] = useState("");
   const [reason, setReason] = useState<ProductionNonConformityReason | "">("");
@@ -125,15 +130,24 @@ export function OperatorTabletRunView(): React.ReactNode {
       if (run.status === "COMPLETED") toast.success(`Fabrication de ${run.barReference} terminée`);
     },
   });
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelTabletRunRequest(runId),
+    onSuccess: async () => {
+      setCancelOpen(false);
+      await invalidateProduction();
+      toast.success("Lancement annulé. La barre est de nouveau dans la file de la machine.");
+      router.replace("/production/tablet");
+    },
+  });
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   useEffect(() => {
     if (operatorQuery.error instanceof ApiError && operatorQuery.error.status === 401)
-      router.replace("/production/login");
+      router.replace("/login");
     if (runQuery.error instanceof ApiError && runQuery.error.status === 401)
-      router.replace("/production/login");
+      router.replace("/login");
   }, [operatorQuery.error, router, runQuery.error]);
 
   if (operatorQuery.isLoading || runQuery.isLoading)
@@ -170,9 +184,14 @@ export function OperatorTabletRunView(): React.ReactNode {
 
   const run = runQuery.data.run;
   const running = run.status === "RUNNING";
+  const isRunStarter = run.startedByOperatorId === operator.id;
   const duration = elapsedTimeLabel(
     run.startedAt,
-    run.finishedAt ? new Date(run.finishedAt).getTime() : now,
+    run.finishedAt
+      ? new Date(run.finishedAt).getTime()
+      : run.cancelledAt
+        ? new Date(run.cancelledAt).getTime()
+        : now,
   );
   const submitReport = (): void => {
     const parsed = reportProductionNonConformitySchema.safeParse({
@@ -194,25 +213,30 @@ export function OperatorTabletRunView(): React.ReactNode {
         operator={operator}
         machineName={run.machineName}
         action={
-          <Badge
-            className={
-              running
-                ? "min-h-8 bg-red-50 px-3 text-red-800 hover:bg-red-50"
-                : "min-h-8 bg-emerald-50 px-3 text-emerald-800 hover:bg-emerald-50"
-            }
+          <StatusBadge
+            tone={running ? "warning" : run.status === "CANCELLED" ? "neutral" : "active"}
+            className="min-h-8 px-3"
           >
-            {running ? "En cours" : "Terminée"}
-          </Badge>
+            {running ? "En cours" : run.status === "CANCELLED" ? "Lancement annulé" : "Terminée"}
+          </StatusBadge>
         }
       />
       <main className="mx-auto max-w-4xl space-y-4 p-4 pt-5 sm:p-6 sm:pt-7">
         <Button asChild variant="ghost" className="min-h-11 px-0">
-          <Link href="/production/tablet">
+          <ReturnLink href="/production/tablet">
             <ArrowLeft className="size-5" />
-            File machine
-          </Link>
+            Retour
+          </ReturnLink>
         </Button>
-        <Card className={running ? "border-nim-red/30" : "border-emerald-200"}>
+        <Card
+          className={
+            running
+              ? "border-nim-red/30"
+              : run.status === "CANCELLED"
+                ? "border-amber-200"
+                : "border-emerald-200"
+          }
+        >
           <CardContent className="p-5 sm:p-7">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
@@ -244,7 +268,11 @@ export function OperatorTabletRunView(): React.ReactNode {
                 </Badge>
               ))}
             </div>
-            {!running ? (
+            <p className="mt-3 text-xs text-slate-500">
+              Lancement effectué par{" "}
+              <span className="font-medium text-slate-700">{run.startedBy.displayName}</span>
+            </p>
+            {run.status === "COMPLETED" ? (
               <div className="mt-5 flex items-start gap-3 rounded-lg bg-emerald-50 p-4 text-sm text-emerald-900">
                 <CheckCircle2 className="mt-0.5 size-5 shrink-0" />
                 <div>
@@ -254,6 +282,15 @@ export function OperatorTabletRunView(): React.ReactNode {
                     L’historique et les indicateurs ont été mis à jour.
                   </p>
                 </div>
+              </div>
+            ) : null}
+            {run.status === "CANCELLED" ? (
+              <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-900">
+                <p className="font-semibold">Lancement annulé</p>
+                <p className="mt-1">
+                  La barre est revenue dans la file machine. L’événement de lancement reste
+                  consultable dans l’historique.
+                </p>
               </div>
             ) : null}
           </CardContent>
@@ -282,14 +319,16 @@ export function OperatorTabletRunView(): React.ReactNode {
                     </p>
                   </div>
                   {issue ? (
-                    <Badge className="bg-red-50 text-red-800 hover:bg-red-50">
+                    <StatusBadge tone="danger">
                       <ShieldAlert className="mr-1 size-3.5" />
                       Non conforme
-                    </Badge>
+                    </StatusBadge>
                   ) : (
-                    <Badge variant="outline">
+                    <StatusBadge
+                      tone={item.productionStatus === "FABRIQUEE" ? "active" : "warning"}
+                    >
                       {item.productionStatus === "FABRIQUEE" ? "Fabriquée" : "En cours"}
-                    </Badge>
+                    </StatusBadge>
                   )}
                 </div>
               );
@@ -322,7 +361,9 @@ export function OperatorTabletRunView(): React.ReactNode {
           </Card>
         ) : null}
         {running ? (
-          <div className="sticky bottom-3 grid gap-2 rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur sm:static sm:grid-cols-2 sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none">
+          <div
+            className={`sticky bottom-3 grid gap-2 rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur sm:static sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none ${isRunStarter ? "sm:grid-cols-3" : "sm:grid-cols-1"}`}
+          >
             <Button
               variant="outline"
               className="h-14 text-base"
@@ -335,14 +376,34 @@ export function OperatorTabletRunView(): React.ReactNode {
               <Flag className="size-5" />
               Signaler une non-conformité
             </Button>
-            <Button
-              className="h-14 text-base"
-              onClick={() => setFinishOpen(true)}
-              disabled={finishMutation.isPending}
-            >
-              <CheckCircle2 className="size-5" />
-              Terminer la barre
-            </Button>
+            {isRunStarter ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="h-14 text-base text-destructive"
+                onClick={() => setCancelOpen(true)}
+                disabled={
+                  cancelMutation.isPending || finishMutation.isPending || reportMutation.isPending
+                }
+              >
+                {cancelMutation.isPending ? (
+                  <Loader2 className="size-5 animate-spin" />
+                ) : (
+                  <RotateCcw className="size-5" />
+                )}
+                Annuler le lancement
+              </Button>
+            ) : null}
+            {isRunStarter ? (
+              <Button
+                className="h-14 text-base"
+                onClick={() => setFinishOpen(true)}
+                disabled={finishMutation.isPending}
+              >
+                <CheckCircle2 className="size-5" />
+                Terminer la barre
+              </Button>
+            ) : null}
           </div>
         ) : (
           <Button asChild className="h-14 w-full text-base sm:mx-auto sm:max-w-md">
@@ -352,26 +413,77 @@ export function OperatorTabletRunView(): React.ReactNode {
             </Link>
           </Button>
         )}
+        {running && !isRunStarter ? (
+          <p className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+            Vous consultez cette fabrication en lecture seule. Vous pouvez signaler une
+            non-conformité, mais seul {run.startedBy.displayName} peut annuler ou terminer cette
+            barre.
+          </p>
+        ) : null}
         {finishMutation.isError ? (
           <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">
             {errorMessage(finishMutation.error)}
           </p>
         ) : null}
-        <Dialog
+        {cancelMutation.isError ? (
+          <p className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">
+            {errorMessage(cancelMutation.error)}
+          </p>
+        ) : null}
+        <AlertDialog
+          open={cancelOpen}
+          onOpenChange={(open) => {
+            if (!cancelMutation.isPending) setCancelOpen(open);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Annuler le lancement de {run.barReference} ?</AlertDialogTitle>
+              <AlertDialogDescription>
+                La barre et ses pièces retourneront dans la file de la machine, sans effacer
+                l’historique du lancement. Cette action est bloquée si une non-conformité est
+                ouverte.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {cancelMutation.isError ? (
+              <p role="alert" className="text-sm text-red-700">
+                {errorMessage(cancelMutation.error)}
+              </p>
+            ) : null}
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={cancelMutation.isPending}>
+                Continuer la fabrication
+              </AlertDialogCancel>
+              <AlertDialogAction
+                disabled={cancelMutation.isPending}
+                onClick={(event) => {
+                  event.preventDefault();
+                  cancelMutation.mutate();
+                }}
+              >
+                {cancelMutation.isPending ? "Annulation…" : "Confirmer l’annulation"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <Sheet
           open={reportOpen}
           onOpenChange={(open) => {
             if (!reportMutation.isPending) setReportOpen(open);
           }}
         >
-          <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Signaler une non-conformité</DialogTitle>
-              <DialogDescription>
+          <SheetContent
+            side="right"
+            className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-lg dark:border-slate-800 dark:bg-slate-950"
+          >
+            <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+              <SheetTitle>Signaler une non-conformité</SheetTitle>
+              <SheetDescription>
                 Le statut de fabrication reste inchangé. L’alerte qualité sera rattachée à cette
                 pièce, cette barre et cette session.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-4 py-2">
+              </SheetDescription>
+            </SheetHeader>
+            <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
               <div className="space-y-2">
                 <Label htmlFor="nc-piece">Pièce concernée</Label>
                 <select
@@ -408,7 +520,8 @@ export function OperatorTabletRunView(): React.ReactNode {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="nc-comment">
-                  Commentaire {reason === "OTHER" ? "(obligatoire)" : "(facultatif)"}
+                  Observation pour l’atelier et la Qualité{" "}
+                  {reason === "OTHER" ? "(obligatoire)" : "(facultative, recommandée)"}
                 </Label>
                 <textarea
                   id="nc-comment"
@@ -416,9 +529,13 @@ export function OperatorTabletRunView(): React.ReactNode {
                   onChange={(event) => setComment(event.target.value)}
                   maxLength={1000}
                   rows={3}
-                  placeholder="Décrivez brièvement le défaut observé"
+                  placeholder="Ex. pièce 209 : perçage décalé de 4 mm côté gauche…"
                   className="min-h-24 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nim-red"
                 />
+                <p className="text-xs leading-relaxed text-slate-500">
+                  Vous travaillez seul ? Notez l’emplacement, la mesure ou ce que vous avez
+                  constaté. Le responsable retrouvera cette observation dans l’Affaire.
+                </p>
               </div>
               {reportError ? (
                 <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">
@@ -431,7 +548,7 @@ export function OperatorTabletRunView(): React.ReactNode {
                 </p>
               ) : null}
             </div>
-            <DialogFooter>
+            <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
               <Button
                 variant="outline"
                 onClick={() => setReportOpen(false)}
@@ -447,9 +564,9 @@ export function OperatorTabletRunView(): React.ReactNode {
                 )}
                 Déclarer non conforme
               </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+            </SheetFooter>
+          </SheetContent>
+        </Sheet>
         <AlertDialog
           open={finishOpen}
           onOpenChange={(open) => {

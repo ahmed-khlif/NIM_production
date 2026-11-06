@@ -9,19 +9,12 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { ApiError, changePasswordRequest } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/ui/page-header";
-
-const roleLabels = {
-  ADMIN: "Administrateur",
-  PRODUCTION_MANAGER: "Responsable production",
-  OPERATOR: "Opérateur",
-  QUALITY_CONTROLLER: "Contrôleur qualité",
-} as const;
+import { RoleBadge } from "@/components/ui/role-badge";
 
 type PasswordFieldProps = {
   id: string;
@@ -117,16 +110,16 @@ export function ProfileView(): React.ReactNode {
           <CardContent className="space-y-4">
             <div><p className="text-xs uppercase tracking-wide text-slate-400">Nom affiché</p><p className="mt-1 text-lg font-semibold text-slate-900">{user.displayName}</p></div>
             <div><p className="text-xs uppercase tracking-wide text-slate-400">Identifiant</p><p className="mt-1 text-sm text-slate-600">@{user.username}</p></div>
-            <div><p className="text-xs uppercase tracking-wide text-slate-400">Rôle</p><Badge variant="outline" className="mt-2">{roleLabels[user.role]}</Badge></div>
+            <div><p className="text-xs uppercase tracking-wide text-slate-400">Rôle</p><RoleBadge role={user.role} className="mt-2" /></div>
             <p className="rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">Les permissions sont contrôlées côté serveur. Modifier ce profil ne change pas votre rôle applicatif.</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="size-4 text-nim-red" />Modifier le mot de passe</CardTitle>
-            <p className="text-xs text-slate-500">Utilisez au moins 8 caractères. La validation finale reste faite par l’API.</p>
+            <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="size-4 text-nim-red" />{user.role === "OPERATOR" ? "Accès opérateur" : "Modifier le mot de passe"}</CardTitle>
+            <p className="text-xs text-slate-500">{user.role === "OPERATOR" ? "L’identifiant et le mot de passe opérateur sont gérés par un administrateur. Contactez-le pour toute modification." : "Utilisez au moins 8 caractères. La validation finale reste faite par l’API."}</p>
           </CardHeader>
-          <CardContent>
+          {user.role === "OPERATOR" ? null : <CardContent>
             <form className="space-y-5" onSubmit={(event) => void submit(event)} noValidate>
               <PasswordField id="current-password" label="Mot de passe actuel" type="currentPassword" visible={visibleFields.current} onToggle={() => setVisibleFields((state) => ({ ...state, current: !state.current }))} register={register} error={errors.currentPassword?.message} />
               <PasswordField id="new-password" label="Nouveau mot de passe" type="newPassword" visible={visibleFields.next} onToggle={() => setVisibleFields((state) => ({ ...state, next: !state.next }))} register={register} error={errors.newPassword?.message} hint="Minimum 8 caractères. Évitez un mot de passe déjà utilisé ailleurs." />
@@ -142,7 +135,7 @@ export function ProfileView(): React.ReactNode {
               {successMessage ? <p className="flex items-start gap-2 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700" role="status"><CheckCircle2 className="mt-0.5 size-4 shrink-0" />{successMessage}</p> : null}
               <Button type="submit" disabled={mutation.isPending}>{mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}Enregistrer le nouveau mot de passe</Button>
             </form>
-          </CardContent>
+          </CardContent>}
         </Card>
       </div>
     </div>

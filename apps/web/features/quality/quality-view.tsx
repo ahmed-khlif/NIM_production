@@ -1,5 +1,6 @@
 "use client";
 
+import { Table } from "@/components/ui/table";
 import type {
   ManagedQualityControl,
   ManagedQualityPendingUnit,
@@ -11,6 +12,7 @@ import type {
 } from "@nim/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   CheckCircle2,
   ClipboardCheck,
   Factory,
@@ -26,8 +28,10 @@ import {
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
+import { ReturnLink } from "@/components/navigation/return-navigation";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/features/auth/auth-provider";
 import {
@@ -47,13 +51,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { KpiCard } from "@/components/ui/kpi-card";
@@ -62,6 +66,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Pagination } from "@/components/ui/pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PriorityBadge } from "@/components/ui/priority-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
@@ -102,18 +107,6 @@ function formatDate(value: string | null): string {
   return value ? dateFormatter.format(new Date(value)) : "—";
 }
 
-function priorityLabel(priority: ManagedQualityPendingUnit["priority"]): string {
-  return priority === "HIGH" ? "Haute" : priority === "LOW" ? "Basse" : "Normale";
-}
-
-function priorityClass(priority: ManagedQualityPendingUnit["priority"]): string {
-  return priority === "HIGH"
-    ? "border-red-200 text-red-700"
-    : priority === "LOW"
-      ? "border-slate-200 text-slate-500"
-      : "border-amber-200 text-amber-700";
-}
-
 function resultTone(result: QualityControlResult): "active" | "danger" {
   return result === "CONFORM" ? "active" : "danger";
 }
@@ -144,21 +137,39 @@ function AccessDenied(): React.ReactNode {
 
 function ProductionNonConformityQueue({
   query,
+  search,
+  onSearchChange,
+  page,
+  pageSize,
+  sorting,
+  onSort,
+  onPageChange,
+  onPageSizeChange,
 }: {
   query: {
-    data?: { nonConformities: ProductionNonConformity[] };
+    data?: { nonConformities: ProductionNonConformity[]; pagination?: { page: number; pageSize: number; total: number; totalPages: number } };
     isLoading: boolean;
     isError: boolean;
     error: unknown;
     refetch: () => Promise<unknown>;
   };
+  search: string;
+  onSearchChange: (value: string) => void;
+  page: number;
+  pageSize: number;
+  sorting: { sortBy: string; sortDirection: "asc" | "desc" };
+  onSort: (sortBy: string, sortDirection: "asc" | "desc") => void;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
 }): React.ReactNode {
   const rows = query.data?.nonConformities ?? [];
+  const pagination = query.data?.pagination ?? { page, pageSize, total: rows.length, totalPages: 1 };
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="border-b">
-        <CardTitle className="text-sm">Non-conformités signalées en atelier <span className="ml-2 rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-700">{rows.length}</span></CardTitle>
-        <p className="text-xs text-slate-500">Signalements tablette ouverts, en attente de traitement qualité.</p>
+    <Card>
+      <CardHeader className="nim-sticky-table-tools border-b">
+        <CardTitle className="text-sm">Signalements atelier ouverts <span className="ml-2 rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-700">{pagination.total}</span></CardTitle>
+        <p className="text-xs text-slate-500">Déclarés depuis une tablette. Ils restent distincts des unités fabriquées en attente de contrôle qualité.</p>
+        <div className="relative mt-3 w-full sm:max-w-sm"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><Input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Rechercher pièce, barre ou machine" aria-label="Rechercher une non-conformité atelier" className="pl-9" /></div>
       </CardHeader>
       <CardContent className="p-0">
         {query.isLoading ? <PendingSkeleton /> : query.isError ? (
@@ -166,11 +177,11 @@ function ProductionNonConformityQueue({
             <p className="text-sm text-red-700">{query.error instanceof ApiError ? query.error.message : "Impossible de charger les signalements atelier."}</p>
             <Button variant="outline" size="sm" onClick={() => void query.refetch()}>Réessayer</Button>
           </div>
-        ) : rows.length === 0 ? (
+        ) : pagination.total === 0 ? (
           <div className="p-5"><EmptyState title="Aucun signalement ouvert" description="Les défauts déclarés par les opérateurs apparaîtront ici." /></div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-sm">
+            <Table className="nim-data-table w-full min-w-[760px] text-left text-sm" serverSorting={{ column: sorting.sortBy === "reference" ? "Pièce / barre" : sorting.sortBy === "reason" ? "Motif" : sorting.sortBy === "machine" ? "Machine" : sorting.sortBy === "reportedBy" ? "Signalé par" : "Date", direction: sorting.sortDirection }} onServerSort={(column, direction) => { const sortBy = ({ "Pi\u00e8ce / barre": "reference", Motif: "reason", Machine: "machine", "Signal\u00e9 par": "reportedBy", Date: "reportedAt" } as Record<string, string>)[column]; if (sortBy) onSort(sortBy, direction); }}>
               <thead className="bg-slate-50 text-xs text-slate-500"><tr>
                 <th className="px-4 py-3">Pièce / barre</th><th className="px-4 py-3">Motif</th><th className="px-4 py-3">Machine</th><th className="px-4 py-3">Signalé par</th><th className="px-4 py-3">Date</th>
               </tr></thead>
@@ -178,16 +189,17 @@ function ProductionNonConformityQueue({
                 {rows.map((row) => (
                   <tr key={row.id}>
                     <td className="px-4 py-3"><Link className="font-medium hover:text-nim-red hover:underline" href={`/offers/${row.offerId}/pieces/${row.pieceId}`}>{row.pieceReference} · U{String(row.sequenceNumber).padStart(2, "0")}</Link><p className="text-xs text-slate-500">{row.barReference} · {row.offerReference}</p></td>
-                    <td className="px-4 py-3"><StatusBadge tone="danger">{row.reason.replaceAll("_", " ")}</StatusBadge>{row.comment ? <p className="mt-1 max-w-sm truncate text-xs text-slate-500" title={row.comment}>{row.comment}</p> : null}</td>
+                    <td className="px-4 py-3"><StatusBadge tone="danger">{row.reason.replaceAll("_", " ")}</StatusBadge>{row.comment ? <p className="mt-1 max-w-sm whitespace-pre-wrap text-xs leading-relaxed text-slate-600 dark:text-slate-300" title={row.comment}>{row.comment}</p> : <p className="mt-1 text-xs italic text-slate-400">Aucun commentaire opérateur</p>}</td>
                     <td className="px-4 py-3">{row.machineName}</td>
                     <td className="px-4 py-3">{row.reportedBy.displayName}</td>
                     <td className="px-4 py-3 text-xs text-slate-500">{formatDate(row.reportedAt)}</td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </div>
         )}
+        {!query.isLoading && !query.isError && pagination.total > 0 ? <Pagination page={pagination.page} pageCount={pagination.totalPages} pageSize={pagination.pageSize} total={pagination.total} pageSizes={[10, 20, 50]} itemLabel="non-conformité" onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} /> : null}
       </CardContent>
     </Card>
   );
@@ -229,17 +241,17 @@ function QualityDialog({
   onSubmit: () => void;
 }): React.ReactNode {
   return (
-    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="sm:max-w-[520px]">
-        <DialogHeader>
-          <DialogTitle>Contrôler cette unité</DialogTitle>
-          <DialogDescription>
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && !busy && onClose()}>
+      <SheetContent side="right" className="flex h-full w-full flex-col overflow-hidden border-slate-200 bg-white p-0 sm:max-w-[520px] dark:border-slate-800 dark:bg-slate-950">
+        <SheetHeader className="border-b border-slate-200 px-6 py-5 pr-12 dark:border-slate-800">
+          <SheetTitle>Contrôler cette unité</SheetTitle>
+          <SheetDescription>
             {target
               ? `${target.reference} · Unité ${String(target.sequenceNumber).padStart(2, "0")} · ${target.profile}`
               : "Validez le résultat du contrôle."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-5 py-2">
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
           <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
@@ -320,7 +332,7 @@ function QualityDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <SheetFooter className="border-t border-slate-200 bg-white px-6 py-4 dark:border-slate-800 dark:bg-slate-950">
           <Button variant="outline" onClick={onClose} disabled={busy}>
             Annuler
           </Button>
@@ -336,26 +348,64 @@ function QualityDialog({
             )}
             Confirmer {resultLabels[result].toLowerCase()}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {}): React.ReactNode {
   const { user } = useAuth();
+  const { params: urlParams, update: updateUrl } = useListQueryState();
   const searchParams = useSearchParams();
   const offerId = scopedOfferId ?? (searchParams.get("offerId")?.trim() || undefined);
   const queryClient = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [resultFilter, setResultFilter] = useState<QualityControlResult | "ALL">("ALL");
+  const [search, setSearch] = useState(() => getInitialListParam("search"));
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [pendingPage, setPendingPage] = useState(() => Math.max(1, Number(getInitialListParam("pendingPage", "1")) || 1));
+  const [pendingPageSize, setPendingPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("pendingPageSize", "20"))) ? Number(getInitialListParam("pendingPageSize", "20")) : 20);
+  const [pendingSorting, setPendingSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "manufacturedAt", sortDirection: "asc" });
+  const [resultFilter, setResultFilter] = useState<QualityControlResult | "ALL">(() => ["ALL", "CONFORM", "NON_CONFORM"].includes(getInitialListParam("result", "ALL")) ? getInitialListParam("result", "ALL") as QualityControlResult | "ALL" : "ALL");
   const [target, setTarget] = useState<ManagedQualityPendingUnit | null>(null);
   const [result, setResult] = useState<QualityControlResult>("CONFORM");
   const [defectCategory, setDefectCategory] = useState<QualityDefectCategory | "">("");
   const [comment, setComment] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [historyPage, setHistoryPage] = useState(1);
-  const [historyPageSize, setHistoryPageSize] = useState(10);
+  const [historyPage, setHistoryPage] = useState(() => Math.max(1, Number(getInitialListParam("historyPage", "1")) || 1));
+  const [historyPageSize, setHistoryPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("historyPageSize", "10"))) ? Number(getInitialListParam("historyPageSize", "10")) : 10);
+  const [productionNcSearch, setProductionNcSearch] = useState(() => getInitialListParam("ncSearch"));
+  const [productionNcDebounced, setProductionNcDebounced] = useState("");
+  const [productionNcPage, setProductionNcPage] = useState(() => Math.max(1, Number(getInitialListParam("ncPage", "1")) || 1));
+  const [productionNcPageSize, setProductionNcPageSize] = useState(() => [10, 20, 50].includes(Number(getInitialListParam("ncPageSize", "20"))) ? Number(getInitialListParam("ncPageSize", "20")) : 20);
+  const [productionNcSorting, setProductionNcSorting] = useState<{ sortBy: string; sortDirection: "asc" | "desc" }>({ sortBy: "reportedAt", sortDirection: "desc" });
+  const [activeQualityTab, setActiveQualityTab] = useState("pending");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setProductionNcDebounced(productionNcSearch.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [productionNcSearch]);
+  useEffect(() => setProductionNcPage(1), [productionNcDebounced, productionNcPageSize]);
+  useEffect(() => {
+    setSearch(urlParams.get("search") ?? "");
+    setPendingPage(Math.max(1, Number(urlParams.get("pendingPage")) || 1));
+    setHistoryPage(Math.max(1, Number(urlParams.get("historyPage")) || 1));
+    setProductionNcSearch(urlParams.get("ncSearch") ?? "");
+    setProductionNcPage(Math.max(1, Number(urlParams.get("ncPage")) || 1));
+    const pendingSize = Number(urlParams.get("pendingPageSize"));
+    if ([10, 20, 50].includes(pendingSize)) setPendingPageSize(pendingSize);
+    const historySize = Number(urlParams.get("historyPageSize"));
+    if ([10, 20, 50].includes(historySize)) setHistoryPageSize(historySize);
+    const ncSize = Number(urlParams.get("ncPageSize"));
+    if ([10, 20, 50].includes(ncSize)) setProductionNcPageSize(ncSize);
+    const nextResult = urlParams.get("result") ?? "ALL";
+    setResultFilter(["ALL", "CONFORM", "NON_CONFORM"].includes(nextResult) ? nextResult as QualityControlResult | "ALL" : "ALL");
+  }, [urlParams]);
+  useEffect(() => {
+    updateUrl({ search: search.trim(), pendingPage, pendingPageSize, historyPage, historyPageSize, result: resultFilter, ncSearch: productionNcSearch.trim(), ncPage: productionNcPage, ncPageSize: productionNcPageSize });
+  }, [search, pendingPage, pendingPageSize, historyPage, historyPageSize, resultFilter, productionNcSearch, productionNcPage, productionNcPageSize, updateUrl]);
   const canReview = Boolean(
     user && ["ADMIN", "PRODUCTION_MANAGER", "QUALITY_CONTROLLER"].includes(user.role),
   );
@@ -382,24 +432,25 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
   }
 
   const pendingQuery = useQuery({
-    queryKey: ["quality", "pending", offerId ?? "ALL"],
-    queryFn: () => getQualityPendingRequest(offerId),
+    queryKey: ["quality", "pending", offerId ?? "ALL", pendingPage, pendingPageSize, debouncedSearch, pendingSorting],
+    queryFn: () => getQualityPendingRequest(offerId, { page: pendingPage, pageSize: pendingPageSize, search: debouncedSearch, ...pendingSorting }),
     enabled: canReview,
     retry: false,
   });
   const historyQuery = useQuery({
-    queryKey: ["quality", "history", offerId ?? "ALL"],
-    queryFn: () => getQualityHistoryRequest(offerId),
+    queryKey: ["quality", "history", offerId ?? "ALL", historyPage, historyPageSize, debouncedSearch, resultFilter],
+    queryFn: () => getQualityHistoryRequest(offerId, { page: historyPage, pageSize: historyPageSize, search: debouncedSearch, result: resultFilter }),
     enabled: canReview,
     retry: false,
   });
   const productionNcQuery = useQuery({
-    queryKey: ["quality", "production-non-conformities", offerId ?? "ALL"],
-    queryFn: () => getProductionNonConformitiesRequest({ offerId }),
+    queryKey: ["quality", "production-non-conformities", offerId ?? "ALL", productionNcPage, productionNcPageSize, productionNcDebounced, productionNcSorting],
+    queryFn: () => getProductionNonConformitiesRequest({ offerId, page: productionNcPage, pageSize: productionNcPageSize, search: productionNcDebounced, ...productionNcSorting }),
     enabled: canReview,
     refetchInterval: 15_000,
     retry: false,
   });
+  const openWorkshopNcCount = productionNcQuery.data?.pagination?.total ?? 0;
   const validateMutation = useMutation({
     mutationFn: ({
       pieceUnitId,
@@ -429,28 +480,23 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
 
   const pendingUnits = pendingQuery.data?.units ?? [];
   const history = historyQuery.data?.controls ?? [];
-  const filteredUnits = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return pendingUnits;
-    return pendingUnits.filter((unit) =>
-      `${unit.reference} ${unit.profile} ${unit.machineName ?? ""} ${unit.operatorName ?? ""}`
-        .toLowerCase()
-        .includes(term),
-    );
-  }, [pendingUnits, search]);
-  const filteredHistory = useMemo(
-    () =>
-      resultFilter === "ALL" ? history : history.filter((item) => item.result === resultFilter),
-    [history, resultFilter],
-  );
+  const filteredUnits = pendingUnits;
+  const filteredHistory = history;
+  const pendingPagination = pendingQuery.data?.pagination ?? { page: pendingPage, pageSize: pendingPageSize, total: pendingUnits.length, totalPages: 1 };
+  const historyPagination = historyQuery.data?.pagination ?? { page: historyPage, pageSize: historyPageSize, total: history.length, totalPages: Math.max(1, Math.ceil(history.length / historyPageSize)) };
   const hasFilters = Boolean(search.trim()) || resultFilter !== "ALL";
-  const historyPageCount = Math.max(1, Math.ceil(filteredHistory.length / historyPageSize));
-  const currentHistoryPage = Math.min(historyPage, historyPageCount);
-  const pagedHistory = filteredHistory.slice((currentHistoryPage - 1) * historyPageSize, currentHistoryPage * historyPageSize);
+  const historyPageCount = historyPagination.totalPages;
+  const currentHistoryPage = historyPagination.page;
+  const pagedHistory = filteredHistory;
 
   useEffect(() => {
     setHistoryPage(1);
-  }, [resultFilter, historyPageSize]);
+    setPendingPage(1);
+  }, [debouncedSearch, resultFilter, historyPageSize, pendingPageSize]);
+  useEffect(() => {
+    if (pendingPage > pendingPagination.totalPages) setPendingPage(pendingPagination.totalPages);
+    if (historyPage > historyPagination.totalPages) setHistoryPage(historyPagination.totalPages);
+  }, [historyPage, historyPagination.totalPages, pendingPage, pendingPagination.totalPages]);
 
   function openControl(unit: ManagedQualityPendingUnit): void {
     setTarget(unit);
@@ -503,7 +549,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             {offerId ? (
               <Button variant="outline" asChild>
-                <Link href={`/offers/${offerId}/production`}>Retour à l’offre</Link>
+                <ReturnLink href={`/offers/${offerId}`}>Retour à l’affaire</ReturnLink>
               </Button>
             ) : null}
             <StatusBadge tone={canValidate ? "active" : "neutral"}>
@@ -528,31 +574,53 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           label="À contrôler"
-          value={String(pendingUnits.length)}
+          value={String(pendingPagination.total)}
           detail="Unités en attente"
           icon={ClipboardCheck}
-          tone={pendingUnits.length ? "warning" : "positive"}
+          tone={pendingPagination.total ? "warning" : "positive"}
         />
         <KpiCard
           label="Contrôles récents"
-          value={String(history.length)}
-          detail="Derniers contrôles enregistrés"
+          value={String(historyPagination.total)}
+          detail="Contrôles dans l’historique"
           icon={ShieldCheck}
           tone="neutral"
         />
         <KpiCard
           label="Non conformes"
           value={String(history.filter((item) => item.result === "NON_CONFORM").length)}
-          detail="Dans l’historique chargé"
+          detail="Non conformes sur cette page"
           icon={XCircle}
           tone="danger"
         />
       </div>
 
-      <Tabs defaultValue="pending" className="space-y-4">
+      {offerId && openWorkshopNcCount > 0 ? (
+        <Card className="border-red-200 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20">
+          <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 rounded-lg bg-red-100 p-2 text-red-700 dark:bg-red-950 dark:text-red-300"><AlertTriangle className="size-4" aria-hidden="true" /></span>
+              <div>
+                <p className="font-semibold text-red-900 dark:text-red-200">
+                  {openWorkshopNcCount} signalement{openWorkshopNcCount > 1 ? "s" : ""} ouvert{openWorkshopNcCount > 1 ? "s" : ""} pour cette Affaire
+                </p>
+                <p className="mt-1 text-sm text-red-800/80 dark:text-red-300/80">
+                  Les alertes opérateur sont suivies dans l’atelier ; elles n’apparaissent pas dans « À contrôler » avant la fin de fabrication.
+                </p>
+              </div>
+            </div>
+            <Button variant="outline" className="shrink-0 border-red-200 bg-white text-red-800 hover:bg-red-100 dark:border-red-900 dark:bg-slate-950 dark:text-red-200" onClick={() => setActiveQualityTab("workshop")}>
+              Voir les signalements
+              <XCircle className="size-4" aria-hidden="true" />
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <Tabs value={activeQualityTab} onValueChange={setActiveQualityTab} className="space-y-4">
         <TabsList className="h-auto w-full justify-start overflow-x-auto bg-slate-100 p-1 sm:w-auto dark:bg-slate-900">
           <TabsTrigger value="pending" className="gap-2">
             À traiter
@@ -560,27 +628,27 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
           </TabsTrigger>
           <TabsTrigger value="workshop" className="gap-2">
             Signalements atelier
-            {(productionNcQuery.data?.nonConformities.length ?? 0) > 0 ? (
-              <Badge variant="outline">{productionNcQuery.data?.nonConformities.length}</Badge>
+            {(productionNcQuery.data?.pagination?.total ?? productionNcQuery.data?.nonConformities.length ?? 0) > 0 ? (
+              <Badge variant="outline">{productionNcQuery.data?.pagination?.total ?? productionNcQuery.data?.nonConformities.length}</Badge>
             ) : null}
           </TabsTrigger>
           <TabsTrigger value="history">Historique</TabsTrigger>
         </TabsList>
 
         <TabsContent value="workshop" className="mt-0">
-          <ProductionNonConformityQueue query={productionNcQuery} />
+          <ProductionNonConformityQueue query={productionNcQuery} search={productionNcSearch} onSearchChange={setProductionNcSearch} page={productionNcPage} pageSize={productionNcPageSize} sorting={productionNcSorting} onSort={(sortBy, sortDirection) => { setProductionNcSorting({ sortBy, sortDirection }); setProductionNcPage(1); }} onPageChange={setProductionNcPage} onPageSizeChange={setProductionNcPageSize} />
         </TabsContent>
 
         <TabsContent value="pending" className="mt-0">
       <Card>
-        <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <CardHeader className="nim-sticky-table-tools gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle className="text-sm">Unités en attente</CardTitle>
             <p className="mt-1 text-xs text-slate-500">
               Les unités sont disponibles après la fin de fabrication.
             </p>
             <p className="mt-2 text-xs font-medium text-slate-600" aria-live="polite">
-              {filteredUnits.length} unite(s) affichee(s) sur {pendingUnits.length}
+              {pendingPagination.total.toLocaleString("fr-FR")} {pendingPagination.total === 1 ? "unité correspond" : "unités correspondent"} à la recherche
             </p>
           </div>
           <div className="relative w-full sm:max-w-xs">
@@ -634,7 +702,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                 Réessayer
               </Button>
             </div>
-          ) : filteredUnits.length === 0 ? (
+          ) : pendingPagination.total === 0 ? (
             <div className="p-5">
               <EmptyState
                 title={search ? "Aucun résultat" : "Aucune unité à contrôler"}
@@ -648,7 +716,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
           ) : (
             <>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full text-left text-sm">
+                <Table className="nim-data-table w-full text-left text-sm" serverSorting={{ column: pendingSorting.sortBy === "reference" ? "Unité" : pendingSorting.sortBy === "machine" ? "Machine / opérateur" : pendingSorting.sortBy === "priority" ? "Priorité" : "Fabriquée", direction: pendingSorting.sortDirection }} onServerSort={(column, direction) => { const sortBy = ({ "Unit\u00e9": "reference", "Machine / op\u00e9rateur": "machine", "Priorit\u00e9": "priority", "Fabriqu\u00e9e": "manufacturedAt" } as Record<string, string>)[column]; if (sortBy) { setPendingSorting({ sortBy, sortDirection: direction }); setPendingPage(1); } }}>
                   <caption className="sr-only">
                     File des unités en attente de contrôle qualité
                   </caption>
@@ -658,7 +726,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                       <th className="px-5 py-3 font-medium">Machine / opérateur</th>
                       <th className="px-5 py-3 font-medium">Priorité</th>
                       <th className="px-5 py-3 font-medium">Fabriquée</th>
-                      <th className="px-5 py-3 text-right font-medium">Action</th>
+                      <th className="px-5 py-3 text-right font-medium" data-sortable="false">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -688,9 +756,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                           </div>
                         </td>
                         <td className="px-5 py-4">
-                          <Badge variant="outline" className={priorityClass(unit.priority)}>
-                            {priorityLabel(unit.priority)}
-                          </Badge>
+                          <PriorityBadge priority={unit.priority} />
                         </td>
                         <td className="px-5 py-4 text-xs text-slate-500">
                           {formatDate(unit.manufacturedAt)}
@@ -708,7 +774,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </Table>
               </div>
               <div className="space-y-3 p-4 md:hidden">
                 {filteredUnits.map((unit) => (
@@ -725,9 +791,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                           {unit.profile} · {unit.lengthMm} mm
                         </p>
                       </div>
-                      <Badge variant="outline" className={priorityClass(unit.priority)}>
-                        {priorityLabel(unit.priority)}
-                      </Badge>
+                      <PriorityBadge priority={unit.priority} />
                     </div>
                     <div className="mt-4 grid gap-2 text-xs text-slate-500">
                       <span className="flex items-center gap-1.5">
@@ -751,6 +815,18 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                   </div>
                 ))}
               </div>
+              <div className="border-t border-slate-200 p-4 dark:border-slate-800">
+                <Pagination
+                  page={pendingPagination.page}
+                  pageCount={pendingPagination.totalPages}
+                  pageSize={pendingPagination.pageSize}
+                  total={pendingPagination.total}
+                  itemLabel="unité"
+                  onPageChange={setPendingPage}
+                  onPageSizeChange={(size) => { setPendingPageSize(size); setPendingPage(1); }}
+                  pageSizes={[10, 20, 50]}
+                />
+              </div>
             </>
           )}
         </CardContent>
@@ -763,7 +839,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
           <div>
             <CardTitle className="text-sm">Historique des contrôles</CardTitle>
             <p className="mt-2 text-xs font-medium text-slate-600" aria-live="polite">
-              {filteredHistory.length} décision(s) affichée(s) sur {history.length}
+              {historyPagination.total.toLocaleString("fr-FR")} {historyPagination.total === 1 ? "décision correspond" : "décisions correspondent"} aux filtres
             </p>
           </div>
           <div className="flex w-full items-center gap-2 sm:w-auto">
@@ -823,7 +899,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                 description="Les décisions qualité apparaîtront ici après la première validation."
               />
             </div>
-          ) : filteredHistory.length === 0 ? (
+          ) : historyPagination.total === 0 ? (
             <div className="p-5">
               <EmptyState
                 title="Aucun résultat"
@@ -855,7 +931,7 @@ export function QualityView({ offerId: scopedOfferId }: { offerId?: string } = {
                   page={currentHistoryPage}
                   pageCount={historyPageCount}
                   pageSize={historyPageSize}
-                  total={filteredHistory.length}
+                  total={historyPagination.total}
                   itemLabel="contrôle"
                   onPageChange={setHistoryPage}
                   onPageSizeChange={(nextPageSize) => {

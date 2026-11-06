@@ -1,7 +1,9 @@
 import type {
   AvailableProfile,
+  MaterialProfileCatalogItem,
   CuttingPlanBarProposal,
   CuttingPlanStatus,
+  CuttingBarStatus,
   FaconnagePreparation,
   AuthenticatedUser,
   AssignablePieceUnit,
@@ -22,6 +24,7 @@ import type {
   QualityDefectCategory,
   QualityDisposition,
   ManagedNotification,
+  ManagedNotificationsPage,
   DashboardOverview,
   HistoryPage,
   ManagedUser,
@@ -30,7 +33,6 @@ import type {
   ProductionQueueItem,
   UserRole,
   UserSettings,
-  TabletConnectionKeyResult,
   OperatorIdentity,
   MachineSessionSummary,
   ProductionMonitorBar,
@@ -41,6 +43,87 @@ import type {
 } from "@nim/types";
 
 export type OfferStatus = "DRAFT" | "READY" | "IN_PRODUCTION" | "COMPLETED" | "ARCHIVED";
+
+export function getMaterialProfilesRequest(
+  options: { search?: string; includeInactive?: boolean } = {},
+): Promise<{
+  profiles: MaterialProfileCatalogItem[];
+  total: number;
+}> {
+  const params = new URLSearchParams();
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.includeInactive) params.set("includeInactive", "true");
+  return request(`/material-profiles${params.size ? `?${params}` : ""}`);
+}
+
+export function createMaterialProfileRequest(input: {
+  profile: string;
+  aliases?: string[];
+  kgPerMeter: number;
+  rawLengthsMm: number[];
+}): Promise<{ profile: MaterialProfileCatalogItem }> {
+  return request("/material-profiles", { method: "POST", body: JSON.stringify(input) });
+}
+
+export type MaterialProfileImportRow = {
+  row: number;
+  profile: string;
+  aliases?: string[];
+  kgPerMeter: number;
+  rawLengthsMm: number[];
+  errors: string[];
+  existing?: {
+    profile: string;
+    aliases: string[];
+    kgPerMeter: number;
+    rawLengthsMm: number[];
+    isActive: boolean;
+  };
+};
+export function previewMaterialProfileImportRequest(
+  filename: string,
+  dataBase64: string,
+): Promise<{
+  preview: { items: MaterialProfileImportRow[]; total: number; valid: number; invalid: number };
+}> {
+  return request("/material-profiles/import/preview", {
+    method: "POST",
+    body: JSON.stringify({ filename, dataBase64 }),
+  });
+}
+export function importMaterialProfilesRequest(
+  items: Array<
+    Pick<MaterialProfileImportRow, "profile" | "aliases" | "kgPerMeter" | "rawLengthsMm">
+  >,
+  updateExisting: boolean,
+): Promise<{ created: number; updated: number; skipped: number; total: number }> {
+  return request("/material-profiles/import", {
+    method: "POST",
+    body: JSON.stringify({ items, updateExisting }),
+  });
+}
+export async function exportMaterialProfilesRequest(): Promise<Blob> {
+  const response = await fetch(`${API_URL}/material-profiles/export`, { credentials: "include" });
+  if (!response.ok)
+    throw new ApiError(response.status, "EXPORT_FAILED", "Impossible d’exporter le catalogue.");
+  return response.blob();
+}
+
+export function updateMaterialProfileRequest(
+  id: string,
+  input: {
+    profile: string;
+    aliases: string[];
+    kgPerMeter: number;
+    rawLengthsMm: number[];
+    isActive: boolean;
+  },
+): Promise<{ profile: MaterialProfileCatalogItem }> {
+  return request(`/material-profiles/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
 
 export type OfferPlanSummary = {
   id: string;
@@ -60,6 +143,7 @@ export type ManagedOffer = {
   revision: string;
   name: string;
   clientName: string | null;
+  clientId: string | null;
   site: string | null;
   description: string | null;
   status: OfferStatus;
@@ -75,17 +159,53 @@ export type ManagedOffer = {
   latestPlan: OfferPlanSummary | null;
 };
 
-export type OfferDetail = ManagedOffer & {
-  recentImports: Array<{
+export type OfferMaterialReport = {
+  offer: {
     id: string;
-    filename: string;
-    status: "PREVIEWED" | "COMMITTED" | "FAILED";
-    rowsTotal: number;
-    rowsCreated: number;
-    rowsRejected: number;
-    createdAt: string;
-    completedAt: string | null;
+    reference: string;
+    revision: string;
+    name: string;
+    clientName: string | null;
+    site: string | null;
+  };
+  generatedAt: string;
+  materials: Array<{
+    profile: string;
+    rawLengthMm: number;
+    quantity: number;
+    totalWasteMm: number;
+    kgPerMeter: number | null;
+    netWeightKg: number | null;
+    grossWeightKg: number | null;
+    wasteRate: number;
   }>;
+  bars: Array<{
+    reference: string;
+    profile: string;
+    rawLengthMm: number;
+    usedLengthMm: number;
+    wasteMm: number;
+    status: CuttingBarStatus;
+    cuttingPlanReference: string;
+    machine: { id: string; name: string } | null;
+    netWeightKg: number | null;
+    grossWeightKg: number | null;
+    items: Array<{ reference: string; sequenceNumber: number; lengthMm: number }>;
+  }>;
+  totals: {
+    barCount: number;
+    totalRawLengthMm: number;
+    totalWasteMm: number;
+    profileCount: number;
+    netWeightKg: number;
+    grossWeightKg: number;
+    profilesWithoutWeight: string[];
+    profilesWithoutNetWeight: string[];
+    wasteRate: number;
+  };
+};
+
+export type OfferDetail = ManagedOffer & {
   cuttingPlans: OfferPlanSummary[];
 };
 
@@ -109,6 +229,7 @@ export type OfferProductionSummary = {
     completionRate: number;
   };
   statusCounts: Record<string, number>;
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
   pieces: Array<{
     id: string;
     reference: string;
@@ -125,10 +246,131 @@ export type OfferPayload = {
   reference: string;
   revision: string;
   name: string;
-  clientName?: string;
+  clientId?: string | null;
   site?: string;
   description?: string;
 };
+
+export type ManagedClient = {
+  id: string;
+  name: string;
+  taxId: string | null;
+  phoneNumbers: string[];
+  emails: string[];
+  imageUrl: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  offerCount: number;
+};
+
+export type ClientPayload = {
+  name: string;
+  taxId?: string | null;
+  phoneNumbers: string[];
+  emails: string[];
+};
+
+export type ClientDirectoryStatus = "ACTIVE" | "ARCHIVED" | "ALL";
+
+export type ClientDirectoryFilters = {
+  search?: string;
+  status?: ClientDirectoryStatus;
+};
+
+export function getClientsRequest(
+  options: ClientDirectoryFilters & {
+    page?: number;
+    pageSize?: number;
+    includeArchived?: boolean;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+  } = {},
+): Promise<{
+  clients: ManagedClient[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  const params = new URLSearchParams();
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.page) params.set("page", String(options.page));
+  if (options.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options.includeArchived) params.set("includeArchived", "true");
+  if (options.status) params.set("status", options.status);
+  if (options.sortBy) params.set("sortBy", options.sortBy);
+  if (options.sortDirection) params.set("sortDirection", options.sortDirection);
+  return request(`/clients${params.size ? `?${params}` : ""}`);
+}
+
+export function getClientsExportDataRequest(
+  options: ClientDirectoryFilters = {},
+): Promise<ManagedClient[]> {
+  const params = new URLSearchParams();
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.status) params.set("status", options.status);
+  return request(`/clients/export/data${params.size ? `?${params}` : ""}`);
+}
+
+export async function exportClientsRequest(options: ClientDirectoryFilters = {}): Promise<Blob> {
+  const params = new URLSearchParams();
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.status) params.set("status", options.status);
+  const response = await fetch(`${API_URL}/clients/export${params.size ? `?${params}` : ""}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      code?: string;
+      message?: string;
+    } | null;
+    throw new ApiError(
+      response.status,
+      payload?.code ?? "CLIENT_EXPORT_FAILED",
+      payload?.message ?? "Impossible d’exporter le répertoire clients.",
+    );
+  }
+  return response.blob();
+}
+
+export function getClientRequest(id: string): Promise<{ client: ManagedClient }> {
+  return request(`/clients/${encodeURIComponent(id)}`);
+}
+
+export function createClientRequest(input: ClientPayload): Promise<ManagedClient> {
+  return request("/clients", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateClientRequest(
+  id: string,
+  input: Partial<ClientPayload>,
+): Promise<ManagedClient> {
+  return request(`/clients/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function archiveClientRequest(id: string): Promise<{ success: true }> {
+  return request(`/clients/${encodeURIComponent(id)}/archive`, { method: "POST" });
+}
+
+export function restoreClientRequest(id: string): Promise<ManagedClient> {
+  return request(`/clients/${encodeURIComponent(id)}/restore`, { method: "POST" });
+}
+
+export function uploadClientPhotoRequest(id: string, file: File): Promise<ManagedClient> {
+  const formData = new FormData();
+  formData.append("file", file);
+  return uploadRequest(`/clients/${encodeURIComponent(id)}/photo`, formData);
+}
+
+export function removeClientPhotoRequest(id: string): Promise<{ success: true }> {
+  return request(`/clients/${encodeURIComponent(id)}/photo`, { method: "DELETE" });
+}
+
+export function getClientPhotoUrl(id: string, version?: string): string {
+  const base = `${API_URL}/clients/${encodeURIComponent(id)}/photo`;
+  return version ? `${base}?v=${encodeURIComponent(version)}` : base;
+}
 
 export type FaconnageOptimizationStatus = "OPTIMAL" | "FEASIBLE" | "HEURISTIC";
 
@@ -136,7 +378,7 @@ export type FaconnageOptimizationRequest = {
   profiles: Array<{
     profile: string;
     requirements: Array<{ lengthMm: number; quantity: number }>;
-    rawLengths: Array<{ lengthMm: number }>;
+    rawLengths: Array<{ lengthMm: number; quantity?: number }>;
   }>;
 };
 
@@ -195,7 +437,21 @@ export type FaconnageOptimizationBatchResult = {
   proposals?: CuttingPlanBarProposal[];
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+export function getApiBaseUrl(): string {
+  const configuredUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (configuredUrl) return configuredUrl;
+
+  if (typeof window !== "undefined" && window.location.hostname) {
+    const hostname = window.location.hostname;
+    if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+      return `${window.location.protocol}//${hostname}:4000`;
+    }
+  }
+
+  return "http://localhost:4000";
+}
+
+const API_URL = getApiBaseUrl();
 
 export class ApiError extends Error {
   constructor(
@@ -329,18 +585,56 @@ export function updateSettingsRequest(input: {
   return request("/settings", { method: "PATCH", body: JSON.stringify(input) });
 }
 
-export function getNotificationsRequest(): Promise<{
+export function getNotificationsRequest(
+  options: {
+    page: number;
+    pageSize: number;
+    search?: string;
+    eventType?: string;
+    unreadOnly?: boolean;
+    includeEventTypes?: boolean;
+  } = { page: 1, pageSize: 20 },
+): Promise<{
   notifications: ManagedNotification[];
   unreadCount: number;
+  eventTypes: string[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
 }> {
-  return request("/notifications");
+  const params = new URLSearchParams({
+    page: String(options.page),
+    pageSize: String(options.pageSize),
+  });
+  if (options.search) params.set("search", options.search);
+  if (options.eventType) params.set("eventType", options.eventType);
+  if (options.unreadOnly) params.set("unreadOnly", "true");
+  if (options.includeEventTypes) params.set("includeEventTypes", "true");
+  return request(`/notifications?${params.toString()}`);
+}
+
+export function markNotificationReadRequest(id: string): Promise<{ id: string; readAt: string }> {
+  return request(`/notifications/${encodeURIComponent(id)}/read`, { method: "PATCH" });
+}
+
+export function markAllNotificationsReadRequest(): Promise<{
+  updatedCount: number;
+  readAt: string;
+}> {
+  return request("/notifications/read-all", { method: "POST" });
 }
 
 export function getUsersRequest(): Promise<{ users: ManagedUser[] }> {
   return request("/users");
 }
 
-export function getUsersPageRequest(options: { page: number; pageSize: number; search?: string; role?: string; active?: boolean }): Promise<{
+export function getUsersPageRequest(options: {
+  page: number;
+  pageSize: number;
+  search?: string;
+  role?: string;
+  active?: boolean;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
+}): Promise<{
   users: ManagedUser[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
   summary: { activeCount: number; adminCount: number; tabletAccessCount: number };
@@ -351,6 +645,8 @@ export function getUsersPageRequest(options: { page: number; pageSize: number; s
   if (options?.search?.trim()) params.set("search", options.search.trim());
   if (options?.role && options.role !== "all") params.set("role", options.role);
   if (options?.active !== undefined) params.set("active", String(options.active));
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
   return request(`/users?${params.toString()}`);
 }
 
@@ -393,8 +689,10 @@ export function setUserTabletAccessRequest(
   });
 }
 
-export function resetUserTabletKeyRequest(id: string): Promise<TabletConnectionKeyResult> {
-  return request(`/operators/${encodeURIComponent(id)}/reset-key`, { method: "POST" });
+export function endUserMachineSessionRequest(userId: string): Promise<{ success: true }> {
+  return request(`/production/operators/${encodeURIComponent(userId)}/machine-session/end`, {
+    method: "POST",
+  });
 }
 
 export function getOffersRequest(options?: {
@@ -405,6 +703,8 @@ export function getOffersRequest(options?: {
   status?: string;
   clientName?: string;
   site?: string;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
 }): Promise<{
   offers: ManagedOffer[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
@@ -416,8 +716,11 @@ export function getOffersRequest(options?: {
   if (options?.page) params.set("page", String(options.page));
   if (options?.pageSize) params.set("pageSize", String(options.pageSize));
   if (options?.status && options.status !== "ALL") params.set("status", options.status);
-  if (options?.clientName && options.clientName !== "ALL") params.set("clientName", options.clientName);
+  if (options?.clientName && options.clientName !== "ALL")
+    params.set("clientName", options.clientName);
   if (options?.site && options.site !== "ALL") params.set("site", options.site);
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
   const query = params.toString();
   return request(`/offers${query ? `?${query}` : ""}`);
 }
@@ -428,8 +731,23 @@ export function getOfferRequest(id: string): Promise<{ offer: OfferDetail }> {
 
 export function getOfferProductionSummaryRequest(
   id: string,
+  options?: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    status?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+  },
 ): Promise<{ summary: OfferProductionSummary }> {
-  return request(`/offers/${encodeURIComponent(id)}/production-summary`);
+  const params = new URLSearchParams();
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options?.search?.trim()) params.set("search", options.search.trim());
+  if (options?.status && options.status !== "ALL") params.set("status", options.status);
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
+  return request(`/offers/${encodeURIComponent(id)}/production-summary?${params.toString()}`);
 }
 
 export function createOfferRequest(input: OfferPayload): Promise<{ offer: OfferDetail }> {
@@ -443,6 +761,16 @@ export function updateOfferRequest(
   return request(`/offers/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(input),
+  });
+}
+
+export function overrideOfferStatusRequest(
+  id: string,
+  status: Exclude<OfferStatus, "ARCHIVED">,
+): Promise<{ offer: OfferDetail }> {
+  return request(`/offers/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
   });
 }
 
@@ -462,7 +790,14 @@ export function getMachinesRequest(): Promise<{ machines: ManagedMachine[] }> {
   return request("/machines");
 }
 
-export function getMachinesPageRequest(options: { page: number; pageSize: number; search?: string; status?: string }): Promise<{
+export function getMachinesPageRequest(options: {
+  page: number;
+  pageSize: number;
+  search?: string;
+  status?: string;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
+}): Promise<{
   machines: ManagedMachine[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
   statusCounts: Record<string, number>;
@@ -472,19 +807,60 @@ export function getMachinesPageRequest(options: { page: number; pageSize: number
   if (options?.pageSize) params.set("pageSize", String(options.pageSize));
   if (options?.search?.trim()) params.set("search", options.search.trim());
   if (options?.status && options.status !== "ALL") params.set("status", options.status);
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
   return request(`/machines?${params.toString()}`);
 }
 
-export function getMachineRequest(id: string): Promise<{ machine: MachineDetail }> {
-  return request(`/machines/${encodeURIComponent(id)}`);
+export function getMachineRequest(
+  id: string,
+  options: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    status?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+  } = {},
+): Promise<{ machine: MachineDetail }> {
+  const params = new URLSearchParams();
+  if (options.page) params.set("page", String(options.page));
+  if (options.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.status && options.status !== "ALL") params.set("status", options.status);
+  if (options.sortBy) params.set("sortBy", options.sortBy);
+  if (options.sortDirection) params.set("sortDirection", options.sortDirection);
+  return request(`/machines/${encodeURIComponent(id)}?${params.toString()}`);
 }
 
-export function getMachineQueueRequest(id: string): Promise<{
+export function getMachineReleasableBarsRequest(
+  id: string,
+  options: { page?: number; pageSize?: number; search?: string } = {},
+): Promise<{
+  bars: Array<{ id: string; offerId: string; offerReference: string; reference: string }>;
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  const params = new URLSearchParams();
+  if (options.page) params.set("page", String(options.page));
+  if (options.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  return request(`/machines/${encodeURIComponent(id)}/releasable-bars?${params.toString()}`);
+}
+
+export function getMachineQueueRequest(
+  id: string,
+  options: { page?: number; pageSize?: number; search?: string } = {},
+): Promise<{
   machine: MachineDetail;
   queue: MachineDetail["queue"];
+  pagination: MachineDetail["queuePagination"];
   activeOperationCount: number;
 }> {
-  return request(`/machines/${encodeURIComponent(id)}/queue`);
+  const params = new URLSearchParams();
+  if (options.page) params.set("page", String(options.page));
+  if (options.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  return request(`/machines/${encodeURIComponent(id)}/queue?${params.toString()}`);
 }
 
 export function createMachineRequest(input: {
@@ -505,6 +881,12 @@ export function updateMachineRequest(
   return request(`/machines/${id}`, { method: "PATCH", body: JSON.stringify(input) });
 }
 
+export function deleteMachineRequest(
+  id: string,
+): Promise<{ machine: { id: string; name: string; internalNumber: string } }> {
+  return request(`/machines/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export function setMachineStatusRequest(
   id: string,
   status: MachineStatus,
@@ -520,29 +902,52 @@ export type ManagedPieceListItem = ManagedPiece & {
   offerId: string;
   productionStatusCounts: Record<PieceProductionStatus, number>;
   isUnstarted: boolean;
+  canDelete: boolean;
+  deleteBlockedReason: string | null;
 };
 
 export type PieceListQuery = {
   page?: number;
   pageSize?: number;
+  dueDateFrom?: string;
+  dueDateTo?: string;
+  priority?: "HIGH" | "NORMAL" | "LOW";
+  status?: "PLANNED" | "ASSIGNED" | "IN_PROGRESS" | "COMPLETED" | "ARCHIVED";
   search?: string;
   profile?: string;
+  designation?: string;
+  sortBy?:
+    | "reference"
+    | "profile"
+    | "quantity"
+    | "status"
+    | "quality"
+    | "lengthMm"
+    | "unitWeightKg"
+    | "totalWeightKg"
+    | "designation";
+  sortDirection?: "asc" | "desc";
 };
 export type PieceListResponse = {
   pieces: ManagedPieceListItem[];
-  profiles: string[];
   page: number;
   pageSize: number;
   total: number;
   totalPages: number;
 };
 
+export type PieceListFacets = {
+  profiles: string[];
+  qualities: string[];
+  designations: string[];
+};
+
 export type PiecePayload = {
   profile: string;
-  quality: string;
+  quality?: string;
   lengthMm: number;
   unitWeightKg?: number;
-  designation: string;
+  designation?: string;
   priority: PiecePriority;
   dueDate?: string;
 };
@@ -560,6 +965,10 @@ export function getPiecesRequest(query: PieceListQuery = {}): Promise<PieceListR
   return request(`/pieces${pieceListQueryString(query)}`);
 }
 
+export function getPieceFacetsRequest(): Promise<PieceListFacets> {
+  return request("/pieces/facets");
+}
+
 export async function getAllPiecesRequest(): Promise<{ pieces: ManagedPieceListItem[] }> {
   const firstPage = await getPiecesRequest({ page: 1, pageSize: 100 });
   if (firstPage.totalPages <= 1) return { pieces: firstPage.pieces };
@@ -571,11 +980,36 @@ export async function getAllPiecesRequest(): Promise<{ pieces: ManagedPieceListI
   return { pieces: [firstPage, ...remainingPages].flatMap((result) => result.pieces) };
 }
 
+export async function getPlanningPiecesRequest(query: {
+  dueDateFrom: string;
+  dueDateTo: string;
+  search?: string;
+  priority?: "HIGH" | "NORMAL" | "LOW";
+  status?: "PLANNED" | "ASSIGNED" | "IN_PROGRESS" | "COMPLETED" | "ARCHIVED";
+}): Promise<{ pieces: ManagedPieceListItem[] }> {
+  const first = await getPiecesRequest({ ...query, page: 1, pageSize: 100 });
+  if (first.totalPages <= 1) return { pieces: first.pieces };
+  const rest = await Promise.all(
+    Array.from({ length: first.totalPages - 1 }, (_, index) =>
+      getPiecesRequest({ ...query, page: index + 2, pageSize: 100 }),
+    ),
+  );
+  return { pieces: [first, ...rest].flatMap((result) => result.pieces) };
+}
+
 export function getOfferPiecesRequest(
   offerId: string,
   query: PieceListQuery = {},
 ): Promise<PieceListResponse> {
   return request(`/offers/${encodeURIComponent(offerId)}/pieces${pieceListQueryString(query)}`);
+}
+
+export function getOfferPieceFacetsRequest(offerId: string): Promise<PieceListFacets> {
+  return request(`/offers/${encodeURIComponent(offerId)}/pieces/facets`);
+}
+
+export function getOfferNextPieceReferenceRequest(offerId: string): Promise<{ reference: string }> {
+  return request(`/pieces/next-reference?offerId=${encodeURIComponent(offerId)}`);
 }
 
 export function getPieceRequest(id: string): Promise<{ piece: PieceDetail }> {
@@ -603,7 +1037,7 @@ export function commitPieceImportRequest(input: {
 }
 
 export function createPieceRequest(
-  input: PiecePayload & { reference: string; quantity: number },
+  input: PiecePayload & { reference?: string; quantity: number },
 ): Promise<{ piece: ManagedPiece }> {
   return request("/pieces", { method: "POST", body: JSON.stringify(input) });
 }
@@ -649,9 +1083,19 @@ export function commitOfferPieceImportRequest(
 
 export function createOfferPieceRequest(
   offerId: string,
-  input: PiecePayload & { reference: string; quantity: number },
+  input: PiecePayload & { reference?: string; quantity: number },
 ): Promise<{ piece: ManagedPiece }> {
   return request(`/offers/${encodeURIComponent(offerId)}/pieces`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function createOfferPiecesBatchRequest(
+  offerId: string,
+  input: { pieces: Array<PiecePayload & { reference?: string; quantity: number }> },
+): Promise<{ pieces: ManagedPiece[] }> {
+  return request(`/offers/${encodeURIComponent(offerId)}/pieces/batch`, {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -676,6 +1120,16 @@ export function archiveOfferPieceRequest(
     `/offers/${encodeURIComponent(offerId)}/pieces/${encodeURIComponent(id)}/archive`,
     { method: "POST" },
   );
+}
+
+export function deleteUnusedOfferPiecesRequest(
+  offerId: string,
+  pieceIds: string[],
+): Promise<{ deletedCount: number }> {
+  return request(`/offers/${encodeURIComponent(offerId)}/pieces/bulk`, {
+    method: "DELETE",
+    body: JSON.stringify({ pieceIds }),
+  });
 }
 
 export function getAvailableProfilesRequest(): Promise<{
@@ -729,15 +1183,23 @@ export function getOfferCuttingPlansRequest(
   offerId: string,
   page = 1,
   pageSize = 10,
-): Promise<{ plans: OfferPlanSummary[]; pagination?: { page: number; pageSize: number; total: number; totalPages: number } }> {
-  return request(`/offers/${encodeURIComponent(offerId)}/faconnage/plans?page=${page}&pageSize=${pageSize}`);
+): Promise<{
+  plans: OfferPlanSummary[];
+  pagination?: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  return request(
+    `/offers/${encodeURIComponent(offerId)}/faconnage/plans?page=${page}&pageSize=${pageSize}`,
+  );
 }
 
 export function deleteDraftCuttingPlanRequest(
   offerId: string,
   planId: string,
 ): Promise<{ plan: { id: string; reference: string; deletedAt: string } }> {
-  return request(`/offers/${encodeURIComponent(offerId)}/faconnage/plans/${encodeURIComponent(planId)}`, { method: "DELETE" });
+  return request(
+    `/offers/${encodeURIComponent(offerId)}/faconnage/plans/${encodeURIComponent(planId)}`,
+    { method: "DELETE" },
+  );
 }
 
 export function getOfferCuttingPlanRequest(
@@ -779,7 +1241,35 @@ export function cancelCuttingPlanRequest(
   );
 }
 
-export function getOfferBarsRequest(offerId: string, options?: { page?: number; pageSize?: number; search?: string; status?: string; profile?: string }): Promise<{
+export function reviseValidatedCuttingPlanRequest(
+  offerId: string,
+  planId: string,
+): Promise<{
+  plan: {
+    id: string;
+    status: "CANCELLED";
+    cancelledBarCount: number;
+    releasedPieceUnitCount: number;
+  };
+}> {
+  return request(
+    `/offers/${encodeURIComponent(offerId)}/faconnage/plans/${encodeURIComponent(planId)}/revise`,
+    { method: "POST" },
+  );
+}
+
+export function getOfferBarsRequest(
+  offerId: string,
+  options?: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    status?: string;
+    profile?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+  },
+): Promise<{
   bars: ManagedCuttingBar[];
   statusCounts: Record<string, number>;
   profiles: string[];
@@ -792,6 +1282,8 @@ export function getOfferBarsRequest(offerId: string, options?: { page?: number; 
   if (options?.search?.trim()) params.set("search", options.search.trim());
   if (options?.status && options.status !== "ALL") params.set("status", options.status);
   if (options?.profile && options.profile !== "ALL") params.set("profile", options.profile);
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
   return request(`/offers/${encodeURIComponent(offerId)}/bars?${params.toString()}`);
 }
 
@@ -802,6 +1294,10 @@ export function getOfferBarSummaryRequest(offerId: string): Promise<{
   return request(`/offers/${encodeURIComponent(offerId)}/bar-summary`);
 }
 
+export function getOfferMaterialReportRequest(offerId: string): Promise<OfferMaterialReport> {
+  return request(`/offers/${encodeURIComponent(offerId)}/material-report`);
+}
+
 export function getOfferBarRequest(
   offerId: string,
   barId: string,
@@ -809,11 +1305,34 @@ export function getOfferBarRequest(
   return request(`/offers/${encodeURIComponent(offerId)}/bars/${encodeURIComponent(barId)}`);
 }
 
-export function getOfferBarAssignmentsRequest(offerId: string): Promise<{
+export function getOfferBarAssignmentsRequest(
+  offerId: string,
+  options: {
+    availablePage: number;
+    assignmentPage: number;
+    pageSize: number;
+    search?: string;
+    machineId?: string;
+  },
+): Promise<{
   availableBars: ManagedCuttingBar[];
   assignments: ManagedBarAssignment[];
+  availableCount: number;
+  assignmentCount: number;
+  machines: Array<{ machineId: string; assignmentCount: number }>;
+  pagination: {
+    available: { page: number; pageSize: number; total: number; totalPages: number };
+    assignments: { page: number; pageSize: number; total: number; totalPages: number };
+  };
 }> {
-  return request(`/offers/${encodeURIComponent(offerId)}/bar-assignments`);
+  const params = new URLSearchParams({
+    availablePage: String(options.availablePage),
+    assignmentPage: String(options.assignmentPage),
+    pageSize: String(options.pageSize),
+  });
+  if (options.search) params.set("search", options.search);
+  if (options.machineId) params.set("machineId", options.machineId);
+  return request(`/offers/${encodeURIComponent(offerId)}/bar-assignments?${params.toString()}`);
 }
 
 export function assignOfferBarsRequest(
@@ -914,12 +1433,48 @@ export type ReassignAssignmentPayload = {
   reason: string;
 };
 
-export function getAssignmentsRequest(offerId?: string): Promise<{
+export function getAssignmentsRequest(options: {
+  offerId?: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+  machineId?: string;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
+}): Promise<{
   assignments: ManagedAssignment[];
-  availableUnits: AssignablePieceUnit[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  availableUnitCount: number;
+  activeMachineCount: number;
 }> {
-  const query = offerId ? `?offerId=${encodeURIComponent(offerId)}` : "";
-  return request(`/assignments${query}`);
+  const params = new URLSearchParams({
+    page: String(options.page),
+    pageSize: String(options.pageSize),
+  });
+  if (options.offerId) params.set("offerId", options.offerId);
+  if (options.search) params.set("search", options.search);
+  if (options.machineId) params.set("machineId", options.machineId);
+  if (options.sortBy) params.set("sortBy", options.sortBy);
+  if (options.sortDirection) params.set("sortDirection", options.sortDirection);
+  return request(`/assignments?${params.toString()}`);
+}
+
+export function getAvailableAssignmentUnitsRequest(options: {
+  offerId?: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+}): Promise<{
+  availableUnits: AssignablePieceUnit[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  const params = new URLSearchParams({
+    page: String(options.page),
+    pageSize: String(options.pageSize),
+  });
+  if (options.offerId) params.set("offerId", options.offerId);
+  if (options.search) params.set("search", options.search);
+  return request(`/assignments/available-units?${params.toString()}`);
 }
 
 export function createAssignmentRequest(
@@ -978,13 +1533,13 @@ export function finishProductionRequest(
   return request(`/production/${operationId}/complete`, { method: "POST" });
 }
 
-export function operatorTabletLoginRequest(connectionKey: string): Promise<{
+export function operatorTabletLoginRequest(input: { username: string; password: string }): Promise<{
   operator: OperatorIdentity;
   expiresAt: string;
 }> {
   return request("/production/auth/login", {
     method: "POST",
-    body: JSON.stringify({ connectionKey }),
+    body: JSON.stringify(input),
   });
 }
 
@@ -992,22 +1547,62 @@ export function getCurrentTabletOperatorRequest(): Promise<{ operator: OperatorI
   return request("/production/auth/me");
 }
 
+export function operatorTabletHeartbeatRequest(): Promise<{
+  success: true;
+  operatorId: string;
+  serverTime: string;
+}> {
+  return request("/production/presence/heartbeat", { method: "POST" });
+}
+
 export function operatorTabletLogoutRequest(): Promise<{ success: true }> {
-  return request("/production/auth/logout", { method: "POST" });
+  return (async () => {
+    const tabletLogout = request<{ success: true }>("/production/auth/logout", {
+      method: "POST",
+    });
+    // Operators enter through the shared sign-in, which also creates the regular
+    // app session. Revoke that session too so disconnect really signs out the user.
+    const appLogout = request<{ success: true }>("/auth/logout", { method: "POST" }).catch(
+      () => null,
+    );
+    const result = await tabletLogout;
+    await appLogout;
+    return result;
+  })();
 }
 
 export function getTabletMachinesRequest(): Promise<{ machines: TabletMachineOption[] }> {
   return request("/production/machines");
 }
 
-export function getAvailableOperatorsRequest(): Promise<{ operators: OperatorIdentity[] }> {
+export type AvailableTabletOperator = OperatorIdentity & {
+  isOnline: boolean;
+  lastSeenAt: string | null;
+  isAvailable: boolean;
+  activeMachineName: string | null;
+};
+
+export function getAvailableOperatorsRequest(): Promise<{ operators: AvailableTabletOperator[] }> {
   return request("/production/operators/available");
+}
+
+export function getTabletNotificationsRequest(): Promise<ManagedNotificationsPage> {
+  return request("/production/notifications");
+}
+
+export function markTabletNotificationReadRequest(
+  id: string,
+): Promise<{ id: string; readAt: string }> {
+  return request(`/production/notifications/${encodeURIComponent(id)}/read`, { method: "POST" });
 }
 
 export type TabletSessionProjection = {
   session: MachineSessionSummary | null;
+  operatorsWithUnfinishedProduction?: string[];
+  offers: Array<{ id: string; reference: string; name: string; barCount: number }>;
   bars: ManagedCuttingBar[];
   activeRun: TabletProductionRun | null;
+  pagination?: { page: number; pageSize: number; total: number; totalPages: number };
 };
 
 export function startMachineSessionRequest(input: {
@@ -1017,8 +1612,25 @@ export function startMachineSessionRequest(input: {
   return request("/production/sessions", { method: "POST", body: JSON.stringify(input) });
 }
 
-export function getCurrentMachineSessionRequest(): Promise<TabletSessionProjection> {
-  return request("/production/sessions/current");
+export function updateMachineSessionTeamRequest(
+  sessionId: string,
+  input: { helperOperatorIds: string[] },
+): Promise<{ success: true; addedCount: number; removedCount: number; machineId: string }> {
+  return request(`/production/sessions/${encodeURIComponent(sessionId)}/team`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getCurrentMachineSessionRequest(
+  options: { page?: number; pageSize?: number; search?: string; offerId?: string } = {},
+): Promise<TabletSessionProjection> {
+  const params = new URLSearchParams();
+  Object.entries(options).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  const query = params.toString();
+  return request(`/production/sessions/current${query ? `?${query}` : ""}`);
 }
 
 export function endMachineSessionRequest(sessionId: string): Promise<{ success: true }> {
@@ -1044,6 +1656,10 @@ export function finishTabletRunRequest(runId: string): Promise<{ run: TabletProd
   return request(`/production/runs/${encodeURIComponent(runId)}/finish`, { method: "POST" });
 }
 
+export function cancelTabletRunRequest(runId: string): Promise<{ run: TabletProductionRun }> {
+  return request(`/production/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+}
+
 export function reportTabletNonConformityRequest(
   runId: string,
   input: { pieceUnitId: string; reason: ProductionNonConformityReason; comment?: string },
@@ -1059,9 +1675,15 @@ export function getProductionMonitorRequest(
     offerId?: string;
     machineId?: string;
     status?: "FACONNEE" | "AFFECTEE" | "LANCEE" | "FABRIQUEE";
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
   } = {},
 ): Promise<{
   bars: ProductionMonitorBar[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
   counts: {
     shaped: number;
     assigned: number;
@@ -1072,7 +1694,7 @@ export function getProductionMonitorRequest(
 }> {
   const params = new URLSearchParams();
   Object.entries(input).forEach(([key, value]) => {
-    if (value) params.set(key, value);
+    if (value) params.set(key, String(value));
   });
   const query = params.toString();
   return request(`/production/monitor${query ? `?${query}` : ""}`);
@@ -1082,11 +1704,19 @@ export function getProductionNonConformitiesRequest(
   input: {
     offerId?: string;
     machineId?: string;
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
   } = {},
-): Promise<{ nonConformities: ProductionNonConformity[] }> {
+): Promise<{
+  nonConformities: ProductionNonConformity[];
+  pagination?: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
   const params = new URLSearchParams();
   Object.entries(input).forEach(([key, value]) => {
-    if (value) params.set(key, value);
+    if (value) params.set(key, String(value));
   });
   const query = params.toString();
   return request(`/production/non-conformities${query ? `?${query}` : ""}`);
@@ -1094,16 +1724,41 @@ export function getProductionNonConformitiesRequest(
 
 export function getQualityPendingRequest(
   offerId?: string,
-): Promise<{ units: ManagedQualityPendingUnit[] }> {
-  const query = offerId ? `?offerId=${encodeURIComponent(offerId)}` : "";
-  return request(`/quality/pending${query}`);
+  options?: {
+    page?: number;
+    pageSize?: number;
+    search?: string;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+  },
+): Promise<{
+  units: ManagedQualityPendingUnit[];
+  pagination?: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  const params = new URLSearchParams();
+  if (offerId) params.set("offerId", offerId);
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options?.search?.trim()) params.set("search", options.search.trim());
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.sortDirection) params.set("sortDirection", options.sortDirection);
+  return request(`/quality/pending?${params.toString()}`);
 }
 
 export function getQualityHistoryRequest(
   offerId?: string,
-): Promise<{ controls: ManagedQualityControl[] }> {
-  const query = offerId ? `?offerId=${encodeURIComponent(offerId)}` : "";
-  return request(`/quality/history${query}`);
+  options?: { page?: number; pageSize?: number; search?: string; result?: string },
+): Promise<{
+  controls: ManagedQualityControl[];
+  pagination?: { page: number; pageSize: number; total: number; totalPages: number };
+}> {
+  const params = new URLSearchParams();
+  if (offerId) params.set("offerId", offerId);
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.pageSize) params.set("pageSize", String(options.pageSize));
+  if (options?.search?.trim()) params.set("search", options.search.trim());
+  if (options?.result && options.result !== "ALL") params.set("result", options.result);
+  return request(`/quality/history?${params.toString()}`);
 }
 
 export function validateQualityRequest(
@@ -1174,6 +1829,8 @@ export type HistoryQueryInput = {
   entityType?: string;
   actorUserId?: string;
   entityId?: string;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
 };
 
 export function getHistoryRequest(input: HistoryQueryInput = {}): Promise<HistoryPage> {
@@ -1217,4 +1874,6 @@ export function getMachineHistoryRequest(
   Object.entries(input).forEach(([key, value]) => {
     if (value !== undefined && value !== "") params.set(key, String(value));
   });
-  const query = params.toS
+  const query = params.toString();
+  return request(`/history/machines/${encodeURIComponent(id)}${query ? `?${query}` : ""}`);
+}

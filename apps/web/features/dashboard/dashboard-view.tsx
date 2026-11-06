@@ -1,5 +1,6 @@
 "use client";
 
+import { Table } from "@/components/ui/table";
 import type {
   DashboardMachineLoad,
   DashboardOverview,
@@ -7,7 +8,7 @@ import type {
   ManagedHistoryEvent,
 } from "@nim/types";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -17,7 +18,7 @@ import {
   Factory,
   Gauge,
   RefreshCw,
-  Wrench,
+  ShieldCheck,
 } from "lucide-react";
 import Link from "next/link";
 import { AccessDenied } from "@/components/access/access-denied";
@@ -26,11 +27,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { KpiCard } from "@/components/ui/kpi-card";
 import { PageHeader } from "@/components/ui/page-header";
 import { ProductionProgress } from "@/components/ui/production-progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PriorityBadge } from "@/components/ui/priority-badge";
 import { TimelineItem } from "@/components/ui/timeline-item";
 import {
   Select,
@@ -41,8 +42,8 @@ import {
 } from "@/components/ui/select";
 import { ApiError, getDashboardOverviewRequest } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
+import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
 
-const priorityLabels = { HIGH: "Haute", NORMAL: "Normale", LOW: "Basse" } as const;
 const statusLabels = {
   PLANNED: "Planifiée",
   ASSIGNED: "Affectée",
@@ -76,6 +77,7 @@ function eventTitle(event: ManagedHistoryEvent): string {
     PIECE_CREATED: "Pièce créée",
     PIECE_UPDATED: "Pièce mise à jour",
     PIECE_ARCHIVED: "Pièce archivée",
+    PIECE_DELETED: "Pièce supprimée",
     ASSIGNMENT_CREATED: "Affectation créée",
     ASSIGNMENT_REASSIGNED: "Affectation réassignée",
     ASSIGNMENT_REMOVED: "Affectation retirée",
@@ -151,6 +153,51 @@ function DashboardSkeleton(): React.ReactNode {
   );
 }
 
+function DashboardMetric({
+  label,
+  value,
+  detail,
+  icon: Icon,
+  tone = "neutral",
+  progress,
+  className,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: typeof Gauge;
+  tone?: "neutral" | "positive" | "warning" | "danger";
+  progress?: number;
+  className?: string;
+}): React.ReactNode {
+  const tones = {
+    neutral: { icon: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300", bar: "bg-slate-500", value: "text-slate-950 dark:text-slate-50" },
+    positive: { icon: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300", bar: "bg-emerald-600", value: "text-slate-950 dark:text-slate-50" },
+    warning: { icon: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300", bar: "bg-amber-500", value: "text-amber-700 dark:text-amber-300" },
+    danger: { icon: "bg-red-50 text-nim-red dark:bg-red-950 dark:text-red-300", bar: "bg-nim-red", value: "text-nim-red dark:text-red-300" },
+  }[tone];
+
+  return (
+    <Card className={`min-w-0 overflow-hidden border-slate-200/80 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950 sm:p-5 ${className ?? ""}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium tracking-wide text-slate-500">{label}</p>
+          <p className={`mt-2 text-3xl font-semibold tracking-tight tabular-nums ${tones.value}`}>{value}</p>
+        </div>
+        <span className={`inline-flex size-9 shrink-0 items-center justify-center rounded-lg ${tones.icon}`}>
+          <Icon className="size-4" aria-hidden="true" />
+        </span>
+      </div>
+      {progress !== undefined ? (
+        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <div className={`h-full rounded-full transition-[width] duration-500 ${tones.bar}`} style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
+        </div>
+      ) : null}
+      <p className="mt-3 text-xs leading-5 text-slate-500">{detail}</p>
+    </Card>
+  );
+}
+
 function MachineLoadRow({ machine }: { machine: DashboardMachineLoad }): React.ReactNode {
   const tone =
     machine.status === "MAINTENANCE"
@@ -166,17 +213,9 @@ function MachineLoadRow({ machine }: { machine: DashboardMachineLoad }): React.R
           {machine.type} · {machine.internalNumber}
         </p>
       </div>
-      <div>
-        <div className="mb-1.5 flex justify-between text-[11px]">
-          <span className="font-semibold text-slate-600">{machine.utilization}% actif</span>
-          <span className="text-slate-400">{machine.queueCount} en file</span>
-        </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
-          <div
-            className={`h-full rounded-full ${machine.status === "MAINTENANCE" ? "bg-amber-400" : machine.utilization > 90 ? "bg-nim-red" : "bg-emerald-500"}`}
-            style={{ width: `${machine.utilization}%` }}
-          />
-        </div>
+      <div className="flex flex-wrap justify-end gap-1.5 text-[11px]">
+        <StatusBadge tone="warning" className="text-[10px]">{machine.inProgressCount} en cours</StatusBadge>
+        <StatusBadge tone="info" className="text-[10px]">{machine.queueCount} en file</StatusBadge>
       </div>
       <StatusBadge tone={tone}>
         {machine.status === "MAINTENANCE"
@@ -194,7 +233,7 @@ function PieceStatus({ status }: { status: DashboardPiece["status"] }): React.Re
     <StatusBadge
       tone={
         status === "IN_PROGRESS"
-          ? "info"
+          ? "warning"
           : status === "COMPLETED"
             ? "active"
             : status === "DELAYED"
@@ -287,19 +326,20 @@ function PriorityActions({
         </Badge>
       </div>
       {actions.length ? (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Card className="border-slate-200/80 p-2 shadow-sm dark:border-slate-800 dark:bg-slate-950 sm:p-3">
+        <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
           {actions.map((action) => (
             <Link
               key={action.label}
               href={action.href}
-              className="group flex min-h-24 items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="group flex min-h-16 items-center justify-between gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:hover:bg-slate-900"
             >
               <span className="min-w-0">
                 <span className="block text-sm font-semibold text-slate-900">{action.label}</span>
                 <span className="mt-1 block text-xs leading-5 text-slate-500">{action.detail}</span>
               </span>
               <span
-                className={`inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-sm font-bold ${action.tone}`}
+                className={`inline-flex min-w-9 shrink-0 items-center justify-center rounded-md px-2 py-1 text-sm font-semibold tabular-nums ${action.tone}`}
                 aria-label={`${action.count} éléments`}
               >
                 {action.count}
@@ -307,6 +347,7 @@ function PriorityActions({
             </Link>
           ))}
         </div>
+        </Card>
       ) : (
         <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 text-sm text-emerald-800">
           <CheckCircle2 className="size-5 shrink-0" aria-hidden="true" />
@@ -319,7 +360,11 @@ function PriorityActions({
 
 export function DashboardView(): React.ReactNode {
   const { user } = useAuth();
-  const [trendDays, setTrendDays] = useState(14);
+  const { params: urlParams, update: updateUrl } = useListQueryState();
+  const [trendDays, setTrendDays] = useState(() => {
+    const days = Number(getInitialListParam("days", "14"));
+    return [7, 14, 30, 90].includes(days) ? days : 14;
+  });
   const canRead = Boolean(user && ["ADMIN", "PRODUCTION_MANAGER"].includes(user.role));
   const query = useQuery({
     queryKey: ["dashboard", "overview", trendDays],
@@ -327,6 +372,13 @@ export function DashboardView(): React.ReactNode {
     enabled: canRead,
     retry: false,
   });
+  useEffect(() => {
+    const days = Number(urlParams.get("days"));
+    setTrendDays([7, 14, 30, 90].includes(days) ? days : 14);
+  }, [urlParams]);
+  useEffect(() => {
+    updateUrl({ days: trendDays === 14 ? null : trendDays });
+  }, [trendDays, updateUrl]);
   const firstName = user?.displayName.split(" ")[0] ?? "à vous";
 
   if (!canRead) return <AccessDenied />;
@@ -336,9 +388,9 @@ export function DashboardView(): React.ReactNode {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Vue d’ensemble"
-        title={`Bonjour, ${firstName}`}
-        description="Voici l’état réel de la production et des opérations en cours."
+        eyebrow="Pilotage d’atelier"
+        title="Production en un coup d’œil"
+        description={`Bonjour ${firstName} — suivez les unités, les échéances, la qualité et les machines actives.`}
         action={
           <div className="flex w-full gap-2 sm:w-auto">
             <Select
@@ -361,7 +413,9 @@ export function DashboardView(): React.ReactNode {
             </Select>
             <Badge variant="outline" className="h-10 gap-2 bg-white px-3 font-medium text-slate-600 dark:bg-slate-950">
               <CalendarDays className="size-4 text-slate-400" />
-              Aujourd’hui
+              {query.dataUpdatedAt
+                ? `Actualisé à ${new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" }).format(query.dataUpdatedAt)}`
+                : "Données de l’atelier"}
             </Badge>
             <Button
               variant="outline"
@@ -399,60 +453,20 @@ export function DashboardView(): React.ReactNode {
         />
       ) : (
         <>
-          <PriorityActions
-            summary={summary}
-            pendingQualityUnits={data.quality?.pendingUnits ?? 0}
-          />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-            <KpiCard
-              label="Avancement global"
-              value={`${summary.progressPercent} %`}
-              detail={`${summary.completedUnits} / ${summary.totalUnits} unités fabriquées`}
-              icon={Gauge}
-              tone="positive"
-            />
-            <KpiCard
-              label="En fabrication"
-              value={String(summary.inProductionUnits)}
-              detail="Unités actuellement actives"
-              icon={CircleDot}
-              tone="neutral"
-            />
-            <KpiCard
-              label="Pièces en retard"
-              value={String(summary.delayedPieces)}
-              detail="Échéance dépassée"
-              icon={AlertTriangle}
-              tone="danger"
-            />
-            <KpiCard
-              label="Machines actives"
-              value={String(summary.activeMachines)}
-              detail={`sur ${summary.totalMachines} machines`}
-              icon={Factory}
-              tone="positive"
-            />
-            <KpiCard
-              label="En maintenance"
-              value={String(summary.maintenanceMachines)}
-              detail="Machines indisponibles"
-              icon={Wrench}
-              tone="warning"
-              className="col-span-2 sm:col-span-1"
-            />
-            <KpiCard
-              label="NC atelier ouvertes"
-              value={String(summary.openNonConformities ?? 0)}
-              detail="À traiter en qualité"
-              icon={AlertTriangle}
-              tone={summary.openNonConformities ? "danger" : "positive"}
-            />
+            <DashboardMetric className="col-span-2" label="Avancement de fabrication" value={`${summary.progressPercent} %`} detail={`${summary.completedUnits.toLocaleString("fr-FR")} sur ${summary.totalUnits.toLocaleString("fr-FR")} unités fabriquées`} icon={Gauge} tone="positive" progress={summary.progressPercent} />
+            <DashboardMetric label="En fabrication" value={String(summary.inProductionUnits)} detail="Unités actuellement en cours" icon={CircleDot} tone={summary.inProductionUnits ? "warning" : "neutral"} />
+            <DashboardMetric label="Pièces en retard" value={String(summary.delayedPieces)} detail={`${data.dueDateSummary.dueTodayPieces} échéance(s) aujourd’hui · ${data.dueDateSummary.dueNextSevenDaysPieces} sous 7 jours`} icon={AlertTriangle} tone={summary.delayedPieces ? "danger" : "positive"} />
+            <DashboardMetric label="NC atelier ouvertes" value={String(summary.openNonConformities ?? 0)} detail={`${data.quality.pendingUnits} unité(s) en attente de contrôle`} icon={ShieldCheck} tone={summary.openNonConformities ? "danger" : data.quality.pendingUnits ? "warning" : "positive"} />
+            <DashboardMetric label="Machines actives" value={`${summary.activeMachines} / ${summary.totalMachines}`} detail={`${summary.maintenanceMachines} en maintenance`} icon={Factory} tone={summary.maintenanceMachines ? "warning" : "positive"} />
           </div>
+          <PriorityActions summary={summary} pendingQualityUnits={data.quality?.pendingUnits ?? 0} />
           <div className="grid gap-5 xl:grid-cols-[1.2fr_0.85fr_0.9fr]">
             <Panel
-              title="Charge des machines"
+              title="Flux des machines"
               action={<PanelLink href="/machines">Voir toutes</PanelLink>}
             >
+              <p className="mb-4 text-xs text-slate-500">Unités en cours et en file, sans estimation artificielle de capacité.</p>
               <div className="space-y-4">
                 {data.machineLoads.length ? (
                   data.machineLoads
@@ -560,7 +574,7 @@ export function DashboardView(): React.ReactNode {
             action={<PanelLink href="/offers">Ouvrir les ordres</PanelLink>}
           >
             <div className="hidden overflow-x-auto md:block">
-              <table className="w-full min-w-[760px] text-left text-sm">
+              <Table className="nim-data-table w-full min-w-[760px] text-left text-sm">
                 <thead className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
                   <tr>
                     <th className="pb-3 pr-4 font-medium">Repère</th>
@@ -586,7 +600,7 @@ export function DashboardView(): React.ReactNode {
                     </tr>
                   )}
                 </tbody>
-              </table>
+              </Table>
             </div>
             <div className="space-y-3 md:hidden">
               {data.activePieces.length ? (
@@ -609,9 +623,7 @@ export function DashboardView(): React.ReactNode {
                         Échéance {formatDueDate(piece.dueDate)}
                       </p>
                     </div>
-                    <Badge variant="outline" className="mt-3">
-                      Priorité {priorityLabels[piece.priority]}
-                    </Badge>
+                    <PriorityBadge priority={piece.priority} prefix className="mt-3" />
                   </div>
                 ))
               ) : (
@@ -622,8 +634,7 @@ export function DashboardView(): React.ReactNode {
               )}
             </div>
           </Panel>
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Panel title="Raccourcis opérationnels">
+          <Panel title="Accès rapides">
               <div className="grid gap-2 sm:grid-cols-3">
                 <Button
                   variant="outline"
@@ -656,17 +667,7 @@ export function DashboardView(): React.ReactNode {
                   </Link>
                 </Button>
               </div>
-            </Panel>
-            <Panel title="Contexte de la journée">
-              <p className="text-sm leading-6 text-slate-600">
-                Les indicateurs sont calculés depuis les ordres, unités, machines et événements
-                persistés dans PostgreSQL.
-              </p>
-              <p className="mt-3 text-xs text-slate-400">
-                Dernière actualisation : {formatDate(new Date().toISOString())}
-              </p>
-            </Panel>
-          </div>
+          </Panel>
         </>
       )}
     </div>

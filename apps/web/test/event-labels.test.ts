@@ -8,7 +8,12 @@ describe("history event labels", () => {
     expect(eventLabel("BAR_PRODUCTION_COMPLETED")).toBe("Fabrication de la barre terminée");
   });
 
+  it("localizes client directory audit events", () => {
+    expect(eventLabel("CLIENT_CREATED")).toBe("Client cr\u00e9\u00e9");
+    expect(eventLabel("CLIENT_PHOTO_UPDATED")).toBe("Photo client modifi\u00e9e");
+  });
+
   it("keeps an understandable fallback for unknown future events", () => {
-    expect(eventLabel("FUTURE_EVENT_TYPE")).toBe("FUTURE EVENT TYPE");
+    expect(eventLabel("FUTURE_EVENT_TYPE")).toBe("Future event type");
   });
 });

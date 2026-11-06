@@ -1,8 +1,8 @@
 "use client";
 
 import { operatorLoginSchema } from "@nim/validation";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, Loader2, ShieldCheck } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Eye, EyeOff, Loader2, ShieldCheck, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -18,19 +18,28 @@ import {
 
 export function OperatorTabletLoginView(): React.ReactNode {
   const router = useRouter();
-  const [connectionKey, setConnectionKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const queryClient = useQueryClient();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const current = useQuery({
     queryKey: ["tablet", "operator"],
     queryFn: getCurrentTabletOperatorRequest,
     retry: false,
-    staleTime: 0,
+    staleTime: 30_000,
   });
   const login = useMutation({
     mutationFn: operatorTabletLoginRequest,
-    onSuccess: () => {
-      setConnectionKey("");
+    onSuccess: async ({ operator: loginOperator }) => {
+      // Avoid using a cached 401 from before login; confirm the new HttpOnly cookie first.
+      await queryClient.cancelQueries({ queryKey: ["tablet", "operator"] });
+      const session = await getCurrentTabletOperatorRequest();
+      if (session.operator.id !== loginOperator.id) {
+        throw new Error("La session opérateur n’a pas pu être confirmée. Réessayez.");
+      }
+      queryClient.setQueryData(["tablet", "operator"], session);
+      setPassword("");
       setFormError(null);
       router.replace("/production/tablet");
     },
@@ -38,6 +47,8 @@ export function OperatorTabletLoginView(): React.ReactNode {
       setFormError(
         error instanceof ApiError
           ? error.message
+          : error instanceof Error && error.message
+            ? error.message
           : "Connexion impossible. Vérifiez le réseau et réessayez.",
       );
     },
@@ -48,13 +59,13 @@ export function OperatorTabletLoginView(): React.ReactNode {
 
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    const parsed = operatorLoginSchema.safeParse({ connectionKey });
+    const parsed = operatorLoginSchema.safeParse({ username, password });
     if (!parsed.success) {
-      setFormError(parsed.error.issues[0]?.message ?? "Saisissez votre clé de connexion.");
+      setFormError(parsed.error.issues[0]?.message ?? "Vérifiez votre identifiant et votre mot de passe.");
       return;
     }
     setFormError(null);
-    login.mutate(parsed.data.connectionKey);
+    login.mutate(parsed.data);
   };
 
   return (
@@ -75,7 +86,7 @@ export function OperatorTabletLoginView(): React.ReactNode {
           <div className="mt-8 flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.04] p-4">
             <ShieldCheck className="size-5 shrink-0 text-emerald-400" />
             <p className="text-xs leading-5 text-slate-300">
-              Votre clé est vérifiée par l’API et n’est jamais conservée dans le navigateur.
+              Connectez-vous avec l’identifiant et le mot de passe de votre compte opérateur.
             </p>
           </div>
         </section>
@@ -83,46 +94,44 @@ export function OperatorTabletLoginView(): React.ReactNode {
           <Card className="w-full border-0 shadow-none">
             <CardContent className="p-0">
               <div className="mb-7 flex size-12 items-center justify-center rounded-xl bg-red-50 text-nim-red">
-                <KeyRound className="size-6" />
+                <UserRound className="size-6" />
               </div>
               <h2 className="text-2xl font-semibold tracking-tight text-slate-950">
                 Connexion opérateur
               </h2>
               <p className="mt-2 text-sm leading-6 text-slate-500">
-                Saisissez la clé remise par votre responsable de production.
+                Utilisez les identifiants remis par votre administrateur ou responsable de production.
               </p>
               <form className="mt-7 space-y-5" onSubmit={submit}>
                 <div className="space-y-2">
-                  <Label htmlFor="tablet-connection-key">Clé de connexion</Label>
+                  <Label htmlFor="tablet-operator-username">Identifiant</Label>
+                  <Input id="tablet-operator-username" autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} className="h-14 text-base" placeholder="Votre identifiant opérateur" />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="tablet-operator-password">Mot de passe</Label>
                   <div className="relative">
                     <Input
-                      id="tablet-connection-key"
-                      type={showKey ? "text" : "password"}
-                      autoComplete="off"
-                      autoCapitalize="characters"
-                      spellCheck={false}
+                      id="tablet-operator-password"
+                      type={showPassword ? "text" : "password"}
+                      autoComplete="current-password"
                       required
-                      value={connectionKey}
-                      onChange={(event) => setConnectionKey(event.target.value)}
-                      className="h-14 pr-12 font-mono text-base tracking-wide"
-                      placeholder="NIM-••••••-••••••••"
-                      aria-describedby="tablet-key-help"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      className="h-14 pr-12 text-base"
+                      placeholder="Votre mot de passe"
                     />
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
                       className="absolute right-2 top-1/2 size-10 -translate-y-1/2"
-                      aria-label={showKey ? "Masquer la clé" : "Afficher la clé"}
-                      aria-pressed={showKey}
-                      onClick={() => setShowKey((visible) => !visible)}
+                      aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                      aria-pressed={showPassword}
+                      onClick={() => setShowPassword((visible) => !visible)}
                     >
-                      {showKey ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
+                      {showPassword ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
                     </Button>
                   </div>
-                  <p id="tablet-key-help" className="text-xs text-slate-400">
-                    La clé est sensible à sa valeur complète.
-                  </p>
                 </div>
                 {formError ? (
                   <p
@@ -153,7 +162,7 @@ export function OperatorTabletLoginView(): React.ReactNode {
                     {login.isPending ? (
                       <Loader2 className="size-5 animate-spin" />
                     ) : (
-                      <KeyRound className="size-5" />
+                      <UserRound className="size-5" />
                     )}
                   </span>
                   {login.isPending ? "Connexion…" : "Se connecter"}

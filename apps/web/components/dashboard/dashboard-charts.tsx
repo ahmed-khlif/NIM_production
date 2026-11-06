@@ -13,16 +13,14 @@ import type {
   QualityDefectCategory,
   QualityDispositionType,
 } from "@nim/types";
-import { AlertTriangle, ClipboardCheck, Clock3, Flame, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Clock3 } from "lucide-react";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
   Cell,
-  Pie,
-  PieChart,
+  Line,
+  LineChart,
   XAxis,
   YAxis,
 } from "recharts";
@@ -80,6 +78,18 @@ const priorityColors: Record<PiecePriority, string> = {
   LOW: "#cbd5e1",
 };
 
+const unitStatusColors: Record<PieceUnitStatus, string> = {
+  PENDING: "#94a3b8",
+  FACONNEE: "#64748b",
+  ASSIGNED: "#60a5fa",
+  IN_PROGRESS: "#e10600",
+  COMPLETED: "#10b981",
+  QUALITY_PENDING: "#f59e0b",
+  ACCEPTED: "#059669",
+  REJECTED: "#dc2626",
+  SCRAPPED: "#475569",
+};
+
 const defectLabels: Record<QualityDefectCategory, string> = {
   DIMENSIONAL: "Dimensionnel",
   SURFACE: "Surface",
@@ -118,43 +128,6 @@ function formatTrendDate(value: string): string {
   );
 }
 
-function Metric({
-  label,
-  value,
-  detail,
-  icon: Icon,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  icon: typeof ShieldCheck;
-  tone?: "neutral" | "positive" | "warning" | "danger";
-}): React.ReactNode {
-  const color =
-    tone === "danger"
-      ? "text-nim-red"
-      : tone === "warning"
-        ? "text-amber-600"
-        : tone === "positive"
-          ? "text-emerald-600"
-          : "text-slate-900";
-  return (
-    <Card className="p-4 transition-shadow hover:shadow-md">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs font-medium text-slate-500">{label}</p>
-          <p className={cn("mt-2 text-2xl font-semibold tracking-tight", color)}>{value}</p>
-          <p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p>
-        </div>
-        <div className={cn("rounded-lg bg-slate-50 p-2.5", color)}>
-          <Icon className="size-4" aria-hidden="true" />
-        </div>
-      </div>
-    </Card>
-  );
-}
-
 function ChartCard({
   title,
   description,
@@ -174,6 +147,33 @@ function ChartCard({
       </CardHeader>
       <CardContent className="pt-2">{children}</CardContent>
     </Card>
+  );
+}
+
+function BreakdownRows({
+  items,
+}: {
+  items: Array<{ label: string; count: number; color: string }>;
+}): React.ReactNode {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  return (
+    <div className="space-y-4" aria-label="Répartition détaillée">
+      {items.map((item) => {
+        const share = total ? Math.round((item.count / total) * 100) : 0;
+        return (
+          <div key={item.label}>
+            <div className="mb-1.5 flex items-center gap-3 text-xs">
+              <span className="min-w-0 flex-1 truncate font-medium text-slate-600 dark:text-slate-300">{item.label}</span>
+              <span className="tabular-nums text-slate-400">{share}%</span>
+              <span className="w-10 text-right font-semibold tabular-nums text-slate-900 dark:text-slate-100">{item.count}</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800" role="img" aria-label={`${item.label}: ${item.count} sur ${total}`}>
+              <div className="h-full rounded-full transition-[width]" style={{ width: `${share}%`, backgroundColor: item.color }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -294,50 +294,19 @@ export function DashboardCharts({
         </p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric
-          label="Conformité qualité"
-          value={`${quality.conformityRate} %`}
-          detail={`${quality.conformUnits} conformes sur ${quality.inspectedUnits} contrôlées`}
-          icon={ShieldCheck}
-          tone={quality.nonConformUnits > 0 ? "warning" : "positive"}
-        />
-        <Metric
-          label="Contrôles en attente"
-          value={String(quality.pendingUnits)}
-          detail="Unités prêtes pour la qualité"
-          icon={ClipboardCheck}
-          tone={quality.pendingUnits > 0 ? "warning" : "positive"}
-        />
-        <Metric
-          label="Échéances à court terme"
-          value={String(dueDateSummary.dueTodayPieces + dueDateSummary.dueNextSevenDaysPieces)}
-          detail={`${dueDateSummary.dueTodayPieces} aujourd’hui · ${dueDateSummary.overduePieces} en retard`}
-          icon={Clock3}
-          tone={dueDateSummary.overduePieces > 0 ? "danger" : "neutral"}
-        />
-        <Metric
-          label="Priorité haute"
-          value={String(priorityBreakdown.find((item) => item.priority === "HIGH")?.count ?? 0)}
-          detail="Ordres nécessitant une attention"
-          icon={Flame}
-          tone="danger"
-        />
-      </div>
-
       <ChartCard
-        title="Production et qualite"
-        description={`Activite quotidienne sur les ${trendDays} derniers jours.`}
+        title="Cadence de production et qualité"
+        description={`Opérations démarrées/terminées et inspections réalisées par jour · ${trendDays} derniers jours.`}
       >
-        <div className="h-[320px]" data-testid="production-trend-chart">
+        <div className="h-[280px] sm:h-[320px]" data-testid="production-trend-chart">
           {hasTrendActivity ? (
             <ChartContainer config={trendConfig}>
-              <AreaChart
+              <LineChart
                 accessibilityLayer
                 data={trendData}
                 margin={{ top: 8, right: 8, left: -20 }}
               >
-                <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="#e2e8f0" />
+                <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="hsl(var(--border))" />
                 <XAxis
                   dataKey="label"
                   tickLine={false}
@@ -349,39 +318,35 @@ export function DashboardCharts({
                 <YAxis allowDecimals={false} tickLine={false} axisLine={false} fontSize={11} />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <ChartLegend content={<ChartLegendContent />} />
-                <Area
-                  type="monotone"
+                <Line
+                  type="linear"
                   dataKey="startedUnits"
                   stroke="var(--color-startedUnits)"
-                  fill="var(--color-startedUnits)"
-                  fillOpacity={0.06}
                   strokeWidth={2}
+                  dot={{ r: 2 }}
                 />
-                <Area
-                  type="monotone"
+                <Line
+                  type="linear"
                   dataKey="completedUnits"
                   stroke="var(--color-completedUnits)"
-                  fill="var(--color-completedUnits)"
-                  fillOpacity={0.12}
                   strokeWidth={2}
+                  dot={{ r: 2 }}
                 />
-                <Area
-                  type="monotone"
+                <Line
+                  type="linear"
                   dataKey="conformUnits"
                   stroke="var(--color-conformUnits)"
-                  fill="var(--color-conformUnits)"
-                  fillOpacity={0.08}
                   strokeWidth={2}
+                  dot={{ r: 2 }}
                 />
-                <Area
-                  type="monotone"
+                <Line
+                  type="linear"
                   dataKey="nonConformUnits"
                   stroke="var(--color-nonConformUnits)"
-                  fill="var(--color-nonConformUnits)"
-                  fillOpacity={0.08}
                   strokeWidth={2}
+                  dot={{ r: 2 }}
                 />
-              </AreaChart>
+              </LineChart>
             </ChartContainer>
           ) : (
             <EmptyState
@@ -409,7 +374,7 @@ export function DashboardCharts({
                   }))}
                   margin={{ top: 8, right: 8, left: -20, bottom: 0 }}
                 >
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="hsl(var(--border))" />
                   <XAxis
                     dataKey="machine"
                     tickLine={false}
@@ -437,48 +402,9 @@ export function DashboardCharts({
           </div>
         </ChartCard>
 
-        <ChartCard title="Répartition des ordres" description="État actuel des ordres actifs.">
-          <div className="h-[300px]" data-testid="piece-status-chart">
-            {statusData.length ? (
-              <ChartContainer config={{ count: { label: "Ordres", color: "#e10600" } }}>
-                <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Pie
-                    data={statusData.map((item) => ({
-                      label: statusLabels[item.status],
-                      count: item.count,
-                    }))}
-                    dataKey="count"
-                    nameKey="label"
-                    innerRadius={72}
-                    outerRadius={102}
-                    paddingAngle={3}
-                    strokeWidth={0}
-                  >
-                    {statusData.map((item) => (
-                      <Cell key={item.status} fill={statusColors[item.status]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ChartContainer>
-            ) : (
-              <EmptyState
-                title="Aucun ordre"
-                description="La répartition apparaîtra avec les premières pièces."
-              />
-            )}
-          </div>
-          <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-2">
-            {statusData.map((item) => (
-              <div key={item.status} className="flex items-center gap-2 text-xs text-slate-500">
-                <span
-                  className="size-2 rounded-full"
-                  style={{ backgroundColor: statusColors[item.status] }}
-                />
-                <span className="min-w-0 flex-1 truncate">{statusLabels[item.status]}</span>
-                <span className="font-semibold tabular-nums text-slate-800">{item.count}</span>
-              </div>
-            ))}
+        <ChartCard title="État du carnet de pièces" description="Nombre et part de chaque état, hors archives.">
+          <div className="min-h-[250px] py-2" data-testid="piece-status-chart">
+            {statusData.length ? <BreakdownRows items={statusData.map((item) => ({ label: statusLabels[item.status], count: item.count, color: statusColors[item.status] }))} /> : <EmptyState title="Aucune pièce" description="Les états apparaîtront dès la création des pièces." />}
           </div>
         </ChartCard>
       </div>
@@ -488,38 +414,9 @@ export function DashboardCharts({
           title="Flux des unités"
           description="Où se trouvent les unités dans le cycle de fabrication."
         >
-          <div className="h-[320px]" data-testid="unit-flow-chart">
+          <div className="min-h-[320px] py-2" data-testid="unit-flow-chart">
             {unitData.length ? (
-              <ChartContainer config={chartConfig}>
-                <BarChart
-                  accessibilityLayer
-                  layout="vertical"
-                  data={unitData.map((item) => ({
-                    status: unitStatusLabels[item.status],
-                    count: item.count,
-                  }))}
-                  margin={{ top: 8, right: 16, left: 8, bottom: 0 }}
-                >
-                  <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis
-                    type="number"
-                    allowDecimals={false}
-                    tickLine={false}
-                    axisLine={false}
-                    fontSize={11}
-                  />
-                  <YAxis
-                    dataKey="status"
-                    type="category"
-                    width={116}
-                    tickLine={false}
-                    axisLine={false}
-                    fontSize={11}
-                  />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="count" fill="var(--color-count)" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ChartContainer>
+              <BreakdownRows items={unitData.map((item) => ({ label: unitStatusLabels[item.status], count: item.count, color: unitStatusColors[item.status] }))} />
             ) : (
               <EmptyState
                 title="Aucune unité"
@@ -529,51 +426,9 @@ export function DashboardCharts({
           </div>
         </ChartCard>
 
-        <ChartCard
-          title="Mix de priorité"
-          description="Répartition des ordres actifs par niveau d’attention."
-        >
-          <div className="h-[320px]" data-testid="priority-chart">
-            {priorityData.length ? (
-              <ChartContainer config={{ count: { label: "Ordres", color: "#64748b" } }}>
-                <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Pie
-                    data={priorityData.map((item) => ({
-                      label: priorityLabels[item.priority],
-                      count: item.count,
-                    }))}
-                    dataKey="count"
-                    nameKey="label"
-                    innerRadius={66}
-                    outerRadius={96}
-                    paddingAngle={4}
-                    strokeWidth={0}
-                  >
-                    {priorityData.map((item) => (
-                      <Cell key={item.priority} fill={priorityColors[item.priority]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ChartContainer>
-            ) : (
-              <EmptyState
-                title="Aucune priorité"
-                description="Les priorités apparaîtront avec les ordres actifs."
-              />
-            )}
-          </div>
-          <div className="space-y-2">
-            {priorityData.map((item) => (
-              <div key={item.priority} className="flex items-center gap-2 text-xs text-slate-500">
-                <span
-                  className="size-2 rounded-full"
-                  style={{ backgroundColor: priorityColors[item.priority] }}
-                />
-                <span className="flex-1">{priorityLabels[item.priority]}</span>
-                <span className="font-semibold tabular-nums text-slate-800">{item.count}</span>
-              </div>
-            ))}
+        <ChartCard title="Priorité des pièces" description="Part et volume des pièces par niveau de priorité.">
+          <div className="min-h-[250px] py-2" data-testid="priority-chart">
+            {priorityData.length ? <BreakdownRows items={priorityData.map((item) => ({ label: priorityLabels[item.priority], count: item.count, color: priorityColors[item.priority] }))} /> : <EmptyState title="Aucune priorité définie" description="Les priorités apparaîtront avec les premiers ordres." />}
           </div>
         </ChartCard>
       </div>
@@ -594,28 +449,30 @@ export function DashboardCharts({
             <div className="flex items-end justify-between gap-4">
               <div>
                 <p className="text-3xl font-semibold tracking-tight text-emerald-600">
-                  {quality.conformityRate} %
+                  {quality.inspectedUnits ? `${quality.conformityRate} %` : "—"}
                 </p>
-                <p className="mt-1 text-xs text-slate-500">taux de conformité</p>
+                <p className="mt-1 text-xs text-slate-500">{quality.inspectedUnits ? "taux de conformité contrôlée" : "aucun contrôle terminé"}</p>
               </div>
               <div className="text-right text-xs leading-5 text-slate-500">
                 <p>{quality.conformUnits} conformes</p>
                 <p className="text-nim-red">{quality.nonConformUnits} non conformes</p>
               </div>
             </div>
-            <div
-              className="h-3 overflow-hidden rounded-full bg-slate-100"
-              role="progressbar"
-              aria-label="Taux de conformité"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={quality.conformityRate}
-            >
+            {quality.inspectedUnits ? (
               <div
-                className="h-full rounded-full bg-emerald-500 transition-all"
-                style={{ width: `${quality.conformityRate}%` }}
-              />
-            </div>
+                className="h-3 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+                role="progressbar"
+                aria-label="Taux de conformité"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={quality.conformityRate}
+              >
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{ width: `${quality.conformityRate}%` }}
+                />
+              </div>
+            ) : null}
             <div className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
               <Clock3 className="size-3.5 shrink-0 text-slate-400" />
               {quality.pendingUnits
@@ -643,7 +500,7 @@ export function DashboardCharts({
                   }))}
                   margin={{ top: 8, right: 16, left: 8, bottom: 0 }}
                 >
-                  <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="hsl(var(--border))" />
                   <XAxis
                     type="number"
                     allowDecimals={false}
@@ -692,7 +549,7 @@ export function DashboardCharts({
                   }))}
                   margin={{ top: 8, right: 16, left: 8, bottom: 0 }}
                 >
-                  <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="hsl(var(--border))" />
                   <XAxis
                     type="number"
                     allowDecimals={false}
