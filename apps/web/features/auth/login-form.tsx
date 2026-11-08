@@ -87,7 +87,7 @@ export function LoginForm(): React.ReactNode {
 
   return (
     <main className="grid min-h-screen bg-background lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
-      <section className="pointer-events-none relative hidden overflow-hidden bg-nim-dark lg:block">
+      <section className="pointer-events-none relative hidden min-w-0 overflow-hidden bg-nim-dark lg:block">
         <Image
           src="/assets/illustrations/login-security.png"
           alt="Illustration industrielle NIM"
@@ -119,7 +119,7 @@ export function LoginForm(): React.ReactNode {
           </div>
         </div>
       </section>
-      <section className="flex items-center justify-center px-5 py-10 sm:px-10">
+      <section className="relative z-10 flex min-w-0 items-center justify-center px-5 py-10 sm:px-10">
         <div className="w-full max-w-[390px]">
           <div className="nim-login-enter mb-12 lg:hidden">
             <NimLogo />

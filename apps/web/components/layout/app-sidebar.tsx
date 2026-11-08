@@ -194,10 +194,15 @@ export function AppSidebar(): React.ReactNode {
             />
           </div>
         </div>
-        <div className="fixed left-4 top-4 z-40 lg:hidden">
+        <div className="fixed left-3 top-[calc(0.75rem+env(safe-area-inset-top))] z-50 lg:hidden">
           <Sheet open={open} onOpenChange={setOpen}>
             <SheetTrigger asChild>
-              <Button variant="default" size="icon" aria-label="Ouvrir le menu">
+              <Button
+                variant="outline"
+                size="icon"
+                className="min-h-11 min-w-11 shrink-0 bg-background shadow-sm"
+                aria-label="Ouvrir le menu"
+              >
                 <Menu className="size-5" />
               </Button>
             </SheetTrigger>

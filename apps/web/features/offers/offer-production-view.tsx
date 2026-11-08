@@ -181,9 +181,9 @@ export function OfferProductionView({ offerId }: { offerId: string }): React.Rea
             icon: Factory,
           },
           {
-            label: "Affectations actives",
-            value: totals.activeAssignments,
-            helper: `${totals.activeOperations} opération(s) en cours`,
+            label: "Barres affectées",
+            value: totals.activeBarAssignments,
+            helper: `${totals.activeProductionRuns} barre(s) en fabrication`,
             icon: ClipboardList,
           },
           {

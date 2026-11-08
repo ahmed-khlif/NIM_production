@@ -21,8 +21,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { AccessDenied } from "@/components/access/access-denied";
-import { DashboardCharts } from "@/components/dashboard/dashboard-charts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,6 +43,23 @@ import {
 import { ApiError, getDashboardOverviewRequest } from "@/features/auth/auth-client";
 import { useAuth } from "@/features/auth/auth-provider";
 import { getInitialListParam, useListQueryState } from "@/lib/list-query-state";
+
+const DashboardCharts = dynamic(
+  () =>
+    import("@/components/dashboard/dashboard-charts").then(
+      (module) => module.DashboardCharts,
+    ),
+  {
+    loading: () => (
+      <Card role="status" aria-label="Chargement des analyses" aria-busy="true">
+        <CardContent className="grid gap-4 p-5 sm:grid-cols-2">
+          <Skeleton className="h-44" />
+          <Skeleton className="h-44" />
+        </CardContent>
+      </Card>
+    ),
+  },
+);
 
 const statusLabels = {
   PLANNED: "Planifiée",
@@ -214,8 +231,8 @@ function MachineLoadRow({ machine }: { machine: DashboardMachineLoad }): React.R
         </p>
       </div>
       <div className="flex flex-wrap justify-end gap-1.5 text-[11px]">
-        <StatusBadge tone="warning" className="text-[10px]">{machine.inProgressCount} en cours</StatusBadge>
-        <StatusBadge tone="info" className="text-[10px]">{machine.queueCount} en file</StatusBadge>
+        <StatusBadge tone="warning" className="text-[10px]">{machine.inProgressCount} barre(s) en cours</StatusBadge>
+        <StatusBadge tone="info" className="text-[10px]">{machine.queueCount} barre(s) à lancer</StatusBadge>
       </div>
       <StatusBadge tone={tone}>
         {machine.status === "MAINTENANCE"
@@ -461,6 +478,34 @@ export function DashboardView(): React.ReactNode {
             <DashboardMetric label="Machines actives" value={`${summary.activeMachines} / ${summary.totalMachines}`} detail={`${summary.maintenanceMachines} en maintenance`} icon={Factory} tone={summary.maintenanceMachines ? "warning" : "positive"} />
           </div>
           <PriorityActions summary={summary} pendingQualityUnits={data.quality?.pendingUnits ?? 0} />
+          <DashboardCharts
+            machineLoads={data.machineLoads}
+            statusBreakdown={data.statusBreakdown ?? []}
+            unitStatusBreakdown={data.unitStatusBreakdown ?? []}
+            priorityBreakdown={data.priorityBreakdown ?? []}
+            quality={
+              data.quality ?? {
+                pendingUnits: 0,
+                inspectedUnits: 0,
+                conformUnits: 0,
+                nonConformUnits: 0,
+                conformityRate: 0,
+                defectBreakdown: [],
+                dispositionBreakdown: [],
+                pendingDeviationCount: 0,
+              }
+            }
+            dueDateSummary={
+              data.dueDateSummary ?? {
+                overduePieces: summary.delayedPieces,
+                dueTodayPieces: 0,
+                dueNextSevenDaysPieces: 0,
+                withoutDueDatePieces: 0,
+              }
+            }
+            productionTrend={data.productionTrend ?? []}
+            trendDays={data.trendDays ?? trendDays}
+          />
           <div className="grid gap-5 xl:grid-cols-[1.2fr_0.85fr_0.9fr]">
             <Panel
               title="Flux des machines"
@@ -535,42 +580,15 @@ export function DashboardView(): React.ReactNode {
               {data.delayedPieces.length ? (
                 <div className="mt-4 flex items-start gap-2 rounded-lg bg-red-50 p-3 text-xs leading-5 text-red-700">
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  {data.delayedPieces.length} pièce
-                  {data.delayedPieces.length > 1 ? "s nécessitent" : " nécessite"} une attention.
+                  {summary.delayedPieces.toLocaleString("fr-FR")} pièce
+                  {summary.delayedPieces > 1 ? "s nécessitent" : " nécessite"} une attention.
                 </div>
               ) : null}
             </Panel>
           </div>
-          <DashboardCharts
-            machineLoads={data.machineLoads}
-            statusBreakdown={data.statusBreakdown ?? []}
-            unitStatusBreakdown={data.unitStatusBreakdown ?? []}
-            priorityBreakdown={data.priorityBreakdown ?? []}
-            quality={
-              data.quality ?? {
-                pendingUnits: 0,
-                inspectedUnits: 0,
-                conformUnits: 0,
-                nonConformUnits: 0,
-                conformityRate: 0,
-                defectBreakdown: [],
-                dispositionBreakdown: [],
-                pendingDeviationCount: 0,
-              }
-            }
-            dueDateSummary={
-              data.dueDateSummary ?? {
-                overduePieces: summary.delayedPieces,
-                dueTodayPieces: 0,
-                dueNextSevenDaysPieces: 0,
-                withoutDueDatePieces: 0,
-              }
-            }
-            productionTrend={data.productionTrend ?? []}
-            trendDays={data.trendDays ?? trendDays}
-          />
+
           <Panel
-            title="Pièces en cours"
+            title="Pièces à suivre"
             action={<PanelLink href="/offers">Ouvrir les ordres</PanelLink>}
           >
             <div className="hidden overflow-x-auto md:block">

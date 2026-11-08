@@ -1,4 +1,4 @@
-﻿import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { useState } from "react";
@@ -29,6 +29,8 @@ import { DataTable } from "@/components/ui/data-table";
 import { Table } from "@/components/ui/table";
 import { TableColumnHeader, TableSortIndicator } from "@/components/ui/table-sort";
 import { PlanningCalendarView } from "@/features/planning/planning-calendar-view";
+import { OfferBatchScheduleSheet } from "@/features/planning/offer-batch-schedule-sheet";
+import { dateKeyInTunis, tunisDateTimeToUtc } from "@/features/planning/planning-time";
 import { AppHeader } from "@/components/layout/app-header";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { PieceImportView } from "@/features/pieces/piece-import-view";
@@ -62,6 +64,11 @@ import {
   getOfferBarSummaryRequest,
   getOfferMaterialReportRequest,
   getOfferBarAssignmentsRequest,
+  getScheduleBoardRequest,
+  getPlanningFirstEventDateRequest,
+  getScheduleOfferDayRequest,
+  previewScheduleBatchRequest,
+  createScheduleBatchRequest,
   assignOfferBarsRequest,
   getOfferProductionSummaryRequest,
   getHistoryRequest,
@@ -247,7 +254,7 @@ vi.mock("@/features/auth/auth-client", () => ({
         id: "machine-1",
         name: "CNC-06",
         internalNumber: "CNC-06",
-        type: "DÃƒÂ©coupe",
+        type: "Découpe",
         status: "ACTIVE",
         description: null,
         location: "Atelier A",
@@ -262,7 +269,7 @@ vi.mock("@/features/auth/auth-client", () => ({
         id: "machine-1",
         name: "CNC-06",
         internalNumber: "CNC-06",
-        type: "DÃƒÂ©coupe",
+        type: "Découpe",
         status: "ACTIVE",
         description: null,
         location: "Atelier A",
@@ -282,13 +289,14 @@ vi.mock("@/features/auth/auth-client", () => ({
       id: "machine-1",
       name: "CNC-06",
       internalNumber: "CNC-06",
-      type: "DÃƒÂ©coupe",
+      type: "Découpe",
       status: "ACTIVE",
       description: null,
       location: "Atelier A",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       activeOperationCount: 0,
+      activeProductionRunCount: 0,
       queue: [],
       queuePagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 },
       assignedBarCount: 0,
@@ -356,6 +364,31 @@ vi.mock("@/features/auth/auth-client", () => ({
       },
     ],
   }),
+  getScheduleBoardRequest: vi.fn().mockResolvedValue({
+    events: [],
+    machines: [{ id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", type: "Découpe", status: "ACTIVE" }],
+    offers: [{ id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }],
+    operators: [],
+    unscheduledBars: [{
+      id: "bar-1",
+      reference: "OFF-001-B001",
+      profile: "IPE200",
+      rawLengthMm: 12000,
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      machine: { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", status: "ACTIVE" as const },
+      assignedAt: "2026-11-06T08:00:00.000Z",
+    }],
+    unscheduledPagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+    range: { startAt: "2026-11-06T23:00:00.000Z", endAt: "2026-11-07T23:00:00.000Z", timeZone: "Africa/Tunis" },
+  }),
+  getPlanningFirstEventDateRequest: vi.fn().mockResolvedValue({ date: null, startAt: null }),
+  previewScheduleBatchRequest: vi.fn().mockResolvedValue({ offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }, startAt: "2026-11-06T07:00:00.000Z", durationMinutes: 60, gapMinutes: 0, bars: [], conflicts: [] }),
+  getScheduleOfferDayRequest: vi.fn().mockResolvedValue({ offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }, date: "2026-11-06", events: [] }),
+  createScheduleBatchRequest: vi.fn().mockResolvedValue({ batchId: "batch-1", events: [] }),
+  getScheduleEventRequest: vi.fn(),
+  createScheduleEventRequest: vi.fn(),
+  updateScheduleEventRequest: vi.fn(),
+  cancelScheduleEventRequest: vi.fn(),
   getOfferPiecesRequest: vi.fn().mockResolvedValue({ pieces: [] }),
   getOfferNextPieceReferenceRequest: vi.fn().mockResolvedValue({ reference: "P-014" }),
   createOfferPieceRequest: vi.fn().mockResolvedValue({ piece: { id: "piece-new" } }),
@@ -567,7 +600,7 @@ vi.mock("@/features/auth/auth-client", () => ({
         status: "QUALITY_PENDING",
         pieceStatus: "COMPLETED",
         machineName: "CNC-06",
-        operatorName: "OpÃƒÂ©rateur",
+        operatorName: "Opérateur",
         manufacturedAt: "2026-01-01T10:00:00.000Z",
       },
     ],
@@ -681,9 +714,9 @@ vi.mock("@/features/auth/auth-client", () => ({
       {
         id: "notification-1",
         eventType: "BAR_PRODUCTION_STARTED",
-        title: "Fabrication de la barre dÃƒÂ©marrÃƒÂ©e",
+        title: "Fabrication de la barre démarrée",
         actorName: "Samira",
-        message: "La fabrication de AFF-B001 a dÃƒÂ©marrÃƒÂ© Ã‚Â· Scie 01.",
+        message: "La fabrication de AFF-B001 a démarré · Scie 01.",
         href: "/offers/offer-1/bars",
         offerId: "offer-1",
         readAt: null,
@@ -718,7 +751,7 @@ describe("shared UI foundation", () => {
       <DataTable
         columns={[{ accessorKey: "name", header: "Nom" }]}
         data={[{ name: "Zinc" }, { name: "Acier" }]}
-        caption="Catalogue matiÃƒÂ¨re"
+        caption="Catalogue matière"
       />,
     );
 
@@ -733,8 +766,8 @@ describe("shared UI foundation", () => {
     const profileSortKey = `nim-table-sort:${window.location.pathname}:profile-default-sort-test`;
     window.sessionStorage.removeItem(profileSortKey);
     const { unmount } = render(
-      <Table aria-label="Profils matiÃ¨re" data-sort-key="profile-default-sort-test">
-        <thead><tr><th>RÃ©fÃ©rence</th><th>Profil</th></tr></thead>
+      <Table aria-label="Profils matière" data-sort-key="profile-default-sort-test">
+        <thead><tr><th>Référence</th><th>Profil</th></tr></thead>
         <tbody>
           <tr><td>2</td><td>IPE200</td></tr>
           <tr><td>1</td><td>HEA140</td></tr>
@@ -748,7 +781,7 @@ describe("shared UI foundation", () => {
     unmount();
     window.sessionStorage.removeItem(`nim-table-sort:${window.location.pathname}:import-order-test`);
     render(
-      <Table aria-label="AperÃ§u import" data-sort-key="import-order-test" defaultSortByProfile={false}>
+      <Table aria-label="Aperçu import" data-sort-key="import-order-test" defaultSortByProfile={false}>
         <thead><tr><th>Ligne</th><th>Profil</th></tr></thead>
         <tbody>
           <tr><td>1</td><td>IPE200</td></tr>
@@ -964,11 +997,11 @@ describe("shared UI foundation", () => {
     );
 
     await userEvent.click(
-      await screen.findByRole("combobox", { name: "Modifier le statut de lÃ¢â‚¬â„¢affaire" }),
+      await screen.findByRole("combobox", { name: "Modifier le statut de l’affaire" }),
     );
     await userEvent.click(await screen.findByRole("option", { name: "Brouillon" }));
     expect(
-      await screen.findByText(/ne rÃƒÂ©initialise ni les barres, affectations, fabrications/i),
+      await screen.findByText(/ne réinitialise ni les barres, affectations, fabrications/i),
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Confirmer le statut" }));
 
@@ -993,7 +1026,7 @@ describe("shared UI foundation", () => {
     render(<SuggestionHarness />);
     const input = screen.getByRole("combobox", { name: "Profil" });
     await userEvent.type(input, "IPE");
-    expect(screen.getByRole("listbox", { name: "Valeurs dÃƒÂ©jÃƒ  utilisÃƒÂ©es" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "Valeurs déjà utilisées" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "IPE200" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "HEA140" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("option", { name: "IPE200" }));
@@ -1110,7 +1143,7 @@ describe("shared UI foundation", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /OFF-2026-0042/ }));
     expect(screen.getByText("OFF42-B001")).toBeInTheDocument();
-    expect(screen.getByText("Barres regroupÃƒÂ©es par profil")).toBeInTheDocument();
+    expect(screen.getByText("Barres regroupées par profil")).toBeInTheDocument();
     expect(screen.queryByText("Aucune barre en attente")).not.toBeInTheDocument();
   });
 
@@ -1129,7 +1162,7 @@ describe("shared UI foundation", () => {
 
     expect(await screen.findByRole("heading", { name: "Affaires" })).toBeInTheDocument();
     expect(await screen.findByText("Aucune affaire")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "CrÃƒÂ©er la premiÃƒÂ¨re affaire" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Créer la première affaire" })).toBeEnabled();
   });
 
   it("keeps Offer overview production metrics in unit counts, separate from bars", async () => {
@@ -1171,13 +1204,13 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("Ãƒâ€°tat des unitÃƒÂ©s")).toBeInTheDocument();
-    expect(screen.getByText("18 / 50 unitÃƒÂ©s fabriquÃƒÂ©es")).toBeInTheDocument();
-    expect(screen.getByText("Ãƒâ‚¬ faÃƒÂ§onner")).toBeInTheDocument();
+    expect(await screen.findByText("État des unités")).toBeInTheDocument();
+    expect(screen.getByText("18 / 50 unités fabriquées")).toBeInTheDocument();
+    expect(screen.getByText("À façonner")).toBeInTheDocument();
     expect(screen.getByText("En fabrication")).toBeInTheDocument();
-    expect(screen.queryByText("Ãƒâ‚¬ affecter")).not.toBeInTheDocument();
-    expect(screen.getByText("2 unitÃƒÂ©(s) attendent un contrÃƒÂ´le qualitÃƒÂ©.")).toBeInTheDocument();
-    expect(screen.queryByText("profils dÃƒÂ©taillÃƒÂ©s")).not.toBeInTheDocument();
+    expect(screen.queryByText("À affecter")).not.toBeInTheDocument();
+    expect(screen.getByText("2 unité(s) attendent un contrôle qualité.")).toBeInTheDocument();
+    expect(screen.queryByText("profils détaillés")).not.toBeInTheDocument();
   });
 
   it("links managers from a ready Affaire directly back to saved plan validation", async () => {
@@ -1250,7 +1283,7 @@ describe("shared UI foundation", () => {
     render(
       <EmptyState
         title="Aucune machine"
-        description="Aucune machine configurÃƒÂ©e."
+        description="Aucune machine configurée."
         illustration="/assets/illustrations/machine-maintenance.png"
         illustrationAlt="Machine en maintenance"
       />,
@@ -1299,16 +1332,29 @@ describe("shared UI foundation", () => {
     expect(screen.getByRole("button", { name: "Ouvrir le menu" })).toBeInTheDocument();
   });
 
+  it("opens the mobile navigation sheet from its visible menu trigger", async () => {
+    const user = userEvent.setup();
+    render(<AppSidebar />);
+
+    const trigger = screen.getByRole("button", { name: "Ouvrir le menu" });
+    expect(trigger).toHaveClass("min-h-11", "min-w-11");
+    await user.click(trigger);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.querySelector('a[href="/dashboard"]')).not.toBeNull();
+    expect(dialog.querySelector('a[href="/offers"]')).not.toBeNull();
+  });
+
   it("uses one shared user directory entry for operator accounts", () => {
     const { rerender } = render(<AppSidebar />);
 
     expect(screen.getByRole("link", { name: "Utilisateurs" })).toHaveAttribute("href", "/users");
-    expect(screen.queryByRole("link", { name: "OpÃƒÂ©rateurs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Opérateurs" })).not.toBeInTheDocument();
 
     sidebarTestState.role = "PRODUCTION_MANAGER";
     rerender(<AppSidebar />);
 
-    expect(screen.getByRole("link", { name: "OpÃƒÂ©rateurs" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Opérateurs" })).toHaveAttribute(
       "href",
       "/users?role=OPERATOR",
     );
@@ -1368,7 +1414,7 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(
-      screen.getByRole("heading", { name: "Production en un coup dÃ¢â‚¬â„¢Ã…â€œil" }),
+      screen.getByRole("heading", { name: "Production en un coup d’œil" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Avancement de fabrication")).toBeInTheDocument();
     expect(screen.getByText("Machines actives")).toBeInTheDocument();
@@ -1420,13 +1466,13 @@ describe("shared UI foundation", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Ãƒâ‚¬ traiter en prioritÃƒÂ©" }),
+      await screen.findByRole("heading", { name: "À traiter en priorité" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /PiÃƒÂ¨ces en retard/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /Pièces en retard/ })).toHaveAttribute(
       "href",
       "/offers",
     );
-    expect(screen.getByRole("link", { name: /ContrÃƒÂ´les qualitÃƒÂ© en attente/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /Contrôles qualité en attente/ })).toHaveAttribute(
       "href",
       "/quality",
     );
@@ -1436,7 +1482,8 @@ describe("shared UI foundation", () => {
     );
   });
 
-  it("renders API-backed dashboard charts", () => {
+  it("renders API-backed dashboard charts in task-focused tabs", async () => {
+    const user = userEvent.setup();
     render(
       <DashboardCharts
         machineLoads={[
@@ -1444,7 +1491,7 @@ describe("shared UI foundation", () => {
             id: "machine-1",
             name: "CNC-06",
             internalNumber: "CNC-06",
-            type: "DÃƒÂ©coupe",
+            type: "Découpe",
             status: "ACTIVE",
             queueCount: 2,
             inProgressCount: 1,
@@ -1484,24 +1531,286 @@ describe("shared UI foundation", () => {
         trendDays={14}
       />,
     );
-    expect(screen.getByTestId("machine-load-chart")).toBeInTheDocument();
-    expect(screen.getByTestId("piece-status-chart")).toBeInTheDocument();
+    expect(screen.getByTestId("production-trend-chart")).toBeInTheDocument();
+    expect(screen.getByTestId("production-heatmap")).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: /Vues analytiques/ })).toHaveClass(
+      "sticky",
+      "top-[76px]",
+    );
+    expect(screen.getByLabelText("Dimanche")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Machines" }));
+    expect(await screen.findByTestId("machine-load-chart")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Flux" }));
+    expect(await screen.findByTestId("piece-status-chart")).toBeInTheDocument();
     expect(screen.getByTestId("unit-flow-chart")).toBeInTheDocument();
     expect(screen.getByTestId("priority-chart")).toBeInTheDocument();
-    expect(screen.getByTestId("production-trend-chart")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Qualité" }));
     expect(screen.getByTestId("quality-defect-chart")).toBeInTheDocument();
     expect(screen.getByTestId("quality-disposition-chart")).toBeInTheDocument();
+    expect(screen.getByTestId("quality-trend-chart")).toBeInTheDocument();
   });
 
-  it("renders the planning calendar from persisted piece due dates", async () => {
+  it("renders the machine resource scheduler instead of the old due-date calendar", async () => {
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value: () => false });
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
+    const today = dateKeyInTunis(new Date());
+    const event = (id: string, reference: string, startMinute: number) => {
+      const startAt = tunisDateTimeToUtc(today, Math.floor(startMinute / 60), startMinute % 60).toISOString();
+      const endAt = tunisDateTimeToUtc(today, Math.floor((startMinute + 30) / 60), (startMinute + 30) % 60).toISOString();
+      return {
+        id,
+        type: "PRODUCTION" as const,
+        status: "PLANNED" as const,
+        title: reference,
+        notes: null,
+        startAt,
+        endAt,
+        cancelledAt: null,
+        createdAt: startAt,
+        updatedAt: startAt,
+        machine: { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", status: "ACTIVE" as const },
+        bar: { id, reference, profile: "IPE200", rawLengthMm: 12000, status: "AFFECTEE" as const, offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" } },
+        operators: [],
+        createdBy: { id: "manager-1", displayName: "Manager" },
+        cancelledBy: null,
+      };
+    };
+    vi.mocked(getScheduleBoardRequest).mockResolvedValueOnce({
+      events: [event("event-1", "OFF-001-B001", 9 * 60), event("event-2", "OFF-001-B002", 9 * 60 + 30)],
+      machines: [
+        { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", type: "Découpe", status: "ACTIVE" },
+        { id: "machine-2", name: "CNC-07", internalNumber: "CNC-07", type: "Découpe", status: "ACTIVE" },
+      ],
+      offers: [{ id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }],
+      operators: [],
+      unscheduledBars: [{
+        id: "bar-1",
+        reference: "OFF-001-B001",
+        profile: "IPE200",
+        rawLengthMm: 12000,
+        offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+        machine: { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", status: "ACTIVE" as const },
+        assignedAt: "2026-11-06T08:00:00.000Z",
+      }],
+      unscheduledPagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+      range: { startAt: tunisDateTimeToUtc(today, 0).toISOString(), endAt: tunisDateTimeToUtc(today, 0).toISOString(), timeZone: "Africa/Tunis" },
+    });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={queryClient}>
         <PlanningCalendarView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByTestId("planning-calendar")).toBeInTheDocument();
-    expect(screen.getByText("CMD-001")).toBeInTheDocument();
+    expect(await screen.findByTestId("planning-resource-timeline")).toBeInTheDocument();
+    const resourceTimeline = screen.getByTestId("planning-resource-timeline");
+    expect(within(resourceTimeline).queryByText("CNC-07")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Afficher toutes les machines (2)" }));
+    expect(within(resourceTimeline).getByText("CNC-07")).toBeInTheDocument();
+    const scheduledBlocks = await screen.findAllByRole("button", { name: /Production OFF-001-B00/ });
+    expect(scheduledBlocks).toHaveLength(2);
+    expect(scheduledBlocks[0]).toHaveTextContent("B001");
+    expect(scheduledBlocks[0]).toHaveClass("min-w-0");
+    const firstEnd = Number.parseFloat(scheduledBlocks[0]!.style.left) + Number.parseFloat(scheduledBlocks[0]!.style.width);
+    expect(Number.parseFloat(scheduledBlocks[1]!.style.left)).toBeCloseTo(firstEnd, 4);
+    expect(screen.getAllByText("CNC-06").length).toBeGreaterThan(0);
+    expect(screen.getByRole("combobox", { name: "Filtrer par Affaire" })).toHaveTextContent("Toutes les Affaires");
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("Barres à planifier · toutes les Affaires");
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("OFF-001-B001");
+    await userEvent.click(screen.getByRole("combobox", { name: "Filtrer par Affaire" }));
+    await userEvent.click(screen.getByRole("option", { name: "OFF-001 · Atelier Nord" }));
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("Barres de l’Affaire à planifier");
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("IPE200");
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("OFF-001-B001");
+    expect(screen.getByRole("combobox", { name: "Filtrer par Affaire" })).toHaveTextContent("OFF-001");
+    await userEvent.click(screen.getByRole("combobox", { name: "Filtrer par Affaire" }));
+    await userEvent.click(screen.getByRole("option", { name: "Toutes les Affaires" }));
+    expect(screen.getByTestId("planning-affair-bars")).toHaveTextContent("Barres à planifier · toutes les Affaires");
+    await userEvent.click(screen.getByRole("button", { name: "Mois" }));
+    expect(screen.getByTestId("planning-month-grid")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mois" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Aller à une date dans le planning" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Choisir une date" })).getByRole("button", { name: "18 novembre 2026" }));
+    expect(screen.getByRole("button", { name: "Aller à une date dans le planning" })).toHaveTextContent("18/11/2026");
+    await userEvent.click(screen.getByRole("button", { name: "Nouvel événement" }));
+    expect(screen.getByRole("button", { name: "Date de début" })).toHaveTextContent("18/11/2026");
+    expect(screen.getByRole("button", { name: "Date de fin" })).toHaveTextContent("18/11/2026");
+    expect(screen.getByRole("group", { name: "Heure de début" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("combobox", { name: "Heure de début, heure" }));
+    await userEvent.click(screen.getByRole("option", { name: "09" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Heure de début, minutes" }));
+    await userEvent.click(screen.getByRole("option", { name: "15" }));
+    expect(screen.getByRole("combobox", { name: "Heure de début, heure" })).toHaveTextContent("09");
+    expect(screen.getByRole("combobox", { name: "Heure de début, minutes" })).toHaveTextContent("15");
+    await userEvent.click(screen.getByRole("button", { name: "Date de début" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Choisir une date" })).getByRole("button", { name: "19 novembre 2026" }));
+    expect(screen.getByRole("button", { name: "Date de début" })).toHaveTextContent("19/11/2026");
+  });
+
+  it("starts the Planning calendar at the earliest event date for its Affaire", async () => {
+    vi.mocked(getPlanningFirstEventDateRequest).mockResolvedValueOnce({ date: "2026-11-06", startAt: "2026-11-06T08:00:00.000Z" });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    render(<QueryClientProvider client={queryClient}><PlanningCalendarView offerId="offer-1" /></QueryClientProvider>);
+
+    expect(await screen.findByRole("button", { name: "Aller à une date dans le planning" })).toHaveTextContent("06/11/2026");
+    expect(getPlanningFirstEventDateRequest).toHaveBeenCalledWith({ offerId: "offer-1", machineId: undefined });
+  });
+
+  it("plans selected bars for an Affaire together while creating an individual schedule per bar", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value: () => false });
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
+    const bar = (id: string, reference: string, startAt: string) => ({
+      id,
+      reference,
+      profile: "IPE200",
+      rawLengthMm: 12000,
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      machine: { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", status: "ACTIVE" as const },
+      assignedAt: "2026-11-06T08:00:00.000Z",
+      startAt,
+      endAt: new Date(new Date(startAt).getTime() + 60 * 60_000).toISOString(),
+      selectable: true,
+      blockedReason: null,
+    });
+    const batchBars = [bar("bar-1", "OFF-001-B001", "2026-11-06T07:00:00.000Z"), bar("bar-2", "OFF-001-B002", "2026-11-06T08:00:00.000Z")];
+    vi.mocked(getScheduleBoardRequest).mockResolvedValue({
+      events: [],
+      machines: [{ id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", type: "Découpe", status: "ACTIVE" }],
+      offers: [{ id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }],
+      operators: [{ id: "operator-1", displayName: "Amine Opérateur" }],
+      unscheduledBars: batchBars.map(({ startAt: _startAt, endAt: _endAt, selectable: _selectable, blockedReason: _blockedReason, ...item }) => item),
+      unscheduledPagination: { page: 1, pageSize: 20, total: 2, totalPages: 1 },
+      range: { startAt: "2026-11-06T23:00:00.000Z", endAt: "2026-11-07T23:00:00.000Z", timeZone: "Africa/Tunis" },
+    });
+    vi.mocked(previewScheduleBatchRequest).mockResolvedValueOnce({
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      startAt: "2026-11-06T07:00:00.000Z",
+      durationMinutes: 60,
+      gapMinutes: 0,
+      bars: batchBars,
+      conflicts: [],
+    });
+    vi.mocked(previewScheduleBatchRequest).mockResolvedValueOnce({
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      startAt: "2026-11-06T07:00:00.000Z",
+      durationMinutes: 75,
+      gapMinutes: 0,
+      bars: batchBars.map((item) => ({ ...item, endAt: new Date(new Date(item.startAt!).getTime() + 75 * 60_000).toISOString() })),
+      conflicts: [],
+    });
+    vi.mocked(createScheduleBatchRequest).mockResolvedValueOnce({ batchId: "batch-1", events: [] });
+    vi.mocked(getScheduleOfferDayRequest).mockResolvedValueOnce({
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      date: "2026-11-06",
+      events: [{
+        id: "scheduled-existing",
+        title: "OFF-001-B009",
+        startAt: "2026-11-06T07:30:00.000Z",
+        endAt: "2026-11-06T08:15:00.000Z",
+        machine: { id: "machine-1", name: "CNC-06", internalNumber: "CNC-06" },
+        bar: { id: "bar-existing", reference: "OFF-001-B009", profile: "IPE200" },
+        operators: [{ id: "operator-1", displayName: "Amine Opérateur", role: "LEAD" }],
+      }],
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    render(<QueryClientProvider client={queryClient}><PlanningCalendarView offerId="offer-1" /></QueryClientProvider>);
+    await user.click(await screen.findByRole("button", { name: "Planifier l’Affaire" }));
+    expect(previewScheduleBatchRequest).toHaveBeenCalled();
+    expect(await screen.findByText(/2 sélectionnée\(s\) sur 2/)).toBeInTheDocument();
+    expect(await screen.findByText("OFF-001-B009")).toBeInTheDocument();
+    expect(screen.getByText(/CNC-06 · CNC-06 · Amine Opérateur/)).toBeInTheDocument();
+    expect(previewScheduleBatchRequest).toHaveBeenCalledWith(expect.objectContaining({ offerId: "offer-1", leadOperatorId: "operator-1" }));
+    const durationInput = screen.getByRole("spinbutton", { name: /Dur.*par barre/ });
+    await user.clear(durationInput);
+    await user.type(durationInput, "75");
+    const verifyButton = screen.getByRole("button", { name: /V.*rifier les cr.*neaux/ });
+    expect(verifyButton).toBeEnabled();
+    await user.click(verifyButton);
+    await waitFor(() => expect(previewScheduleBatchRequest).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Planifier 2 barre(s)" }));
+    await waitFor(() => expect(createScheduleBatchRequest).toHaveBeenCalledWith(expect.objectContaining({
+      offerId: "offer-1",
+      cuttingBarIds: ["bar-1", "bar-2"],
+      leadOperatorId: "operator-1",
+      durationMinutes: 75,
+      gapMinutes: 0,
+    })));
+  });
+
+  it("keeps batch scheduling conflict details readable in a narrow sheet", async () => {
+    vi.mocked(previewScheduleBatchRequest).mockResolvedValueOnce({
+      offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+      startAt: "2026-11-08T07:00:00.000Z",
+      durationMinutes: 60,
+      gapMinutes: 0,
+      bars: [{
+        id: "bar-1",
+        reference: "PT-26999-B001",
+        profile: "HEA100",
+        rawLengthMm: 12100,
+        offer: { id: "offer-1", reference: "OFF-001", name: "Atelier Nord" },
+        machine: { id: "machine-1", name: "KALTENBACH 1", internalNumber: "CN-26", status: "ACTIVE" },
+        assignedAt: "2026-11-06T08:00:00.000Z",
+        startAt: "2026-11-08T07:00:00.000Z",
+        endAt: "2026-11-08T08:00:00.000Z",
+        selectable: true,
+        blockedReason: null,
+      }],
+      conflicts: [{
+        barId: "bar-1",
+        barReference: "PT-26999-B001",
+        machineId: "machine-1",
+        machineName: "KALTENBACH 1",
+        eventTitle: "PT-26999-B002",
+        startAt: "2026-11-08T07:00:00.000Z",
+        endAt: "2026-11-08T08:00:00.000Z",
+        reason: "MACHINE_OVERLAP",
+        resourceType: "MACHINE",
+        resourceLabel: "CN-26 · KALTENBACH 1",
+        conflictingEventStartAt: "2026-11-09T10:00:00.000Z",
+        conflictingEventEndAt: "2026-11-19T08:00:00.000Z",
+        conflictingBarReference: "PT-26999-B002",
+      }],
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    render(<QueryClientProvider client={queryClient}><OfferBatchScheduleSheet
+      open
+      onOpenChange={vi.fn()}
+      offer={{ id: "offer-1", reference: "OFF-001", name: "Atelier Nord" }}
+      operators={[{ id: "operator-1", displayName: "Amine" }]}
+      anchorDate="2026-11-08"
+    /></QueryClientProvider>);
+
+    const conflictTitle = await screen.findByText("Conflit machine");
+    const conflictCard = conflictTitle.parentElement;
+    expect(conflictCard).not.toBeNull();
+    expect(within(conflictCard as HTMLElement).getByText("· CN-26 · KALTENBACH 1")).toBeInTheDocument();
+    expect(within(conflictCard as HTMLElement).getByText(/Déjà réservé par la barre PT-26999-B002/)).toBeInTheDocument();
+    expect(within(conflictCard as HTMLElement).getByText(/9 nov.*11:00.*19 nov.*09:00/)).toBeInTheDocument();
+    expect(screen.getByText("PT-26999-B001").closest("label")).toHaveClass("flex", "min-w-0");
+  });
+
+  it("keeps scheduling scoped to the selected Affaire", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PlanningCalendarView offerId="offer-1" />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByTestId("planning-resource-timeline")).toBeInTheDocument();
+    expect(vi.mocked(getScheduleBoardRequest)).toHaveBeenCalledWith(expect.objectContaining({ offerId: "offer-1" }));
+    expect(screen.queryByTestId("planning-affair-selector")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Filtrer par Affaire" })).not.toBeInTheDocument();
   });
 
   it("shows the authenticated role and notification entry point", async () => {
@@ -1516,7 +1825,7 @@ describe("shared UI foundation", () => {
     expect(screen.getByText("Administrateur")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /notifications/i })).toBeInTheDocument();
     expect(
-      await screen.findByRole("button", { name: /thÃƒÂ¨me sombre|thÃƒÂ¨me clair/i }),
+      await screen.findByRole("button", { name: /thème sombre|thème clair/i }),
     ).toBeInTheDocument();
   });
 
@@ -1534,7 +1843,7 @@ describe("shared UI foundation", () => {
 
     await user.click(screen.getByRole("button", { name: "Ouvrir la recherche globale" }));
     await user.type(
-      screen.getByRole("searchbox", { name: "Rechercher dans toute lÃ¢â‚¬â„¢application" }),
+      screen.getByRole("searchbox", { name: "Rechercher dans toute l’application" }),
       "CNC-06",
     );
     await user.click(screen.getByRole("button", { name: "Lancer la recherche globale" }));
@@ -1558,7 +1867,7 @@ describe("shared UI foundation", () => {
 
     expect(screen.getByRole("textbox", { name: "Search page field" })).toHaveFocus();
     expect(
-      screen.queryByRole("searchbox", { name: "Rechercher dans toute lÃ¢â‚¬â„¢application" }),
+      screen.queryByRole("searchbox", { name: "Rechercher dans toute l’application" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1583,7 +1892,7 @@ describe("shared UI foundation", () => {
           id: "machine-1",
           name: "CNC-06",
           internalNumber: "CNC-06",
-          type: "DÃƒÂ©coupe",
+          type: "Découpe",
           status: "ACTIVE",
           description: null,
           location: "Atelier A",
@@ -1629,7 +1938,7 @@ describe("shared UI foundation", () => {
     const notificationBell = document.querySelector('button[aria-label*="notifications"]');
     expect(notificationBell).not.toBeNull();
     fireEvent.click(notificationBell!);
-    expect(await screen.findByText("Fabrication de la barre dÃƒÂ©marrÃƒÂ©e")).toBeInTheDocument();
+    expect(await screen.findByText("Fabrication de la barre démarrée")).toBeInTheDocument();
     expect(screen.getByText(/Samira/)).toBeInTheDocument();
   });
 
@@ -1640,10 +1949,10 @@ describe("shared UI foundation", () => {
         <UsersView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("RÃƒÂ©pertoire des utilisateurs")).toBeInTheDocument();
+    expect(await screen.findByText("Répertoire des utilisateurs")).toBeInTheDocument();
     expect((await screen.findAllByText("Admin")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Nouvel utilisateur" }));
-    expect(await screen.findByRole("dialog", { name: "CrÃƒÂ©er un utilisateur" })).toHaveClass(
+    expect(await screen.findByRole("dialog", { name: "Créer un utilisateur" })).toHaveClass(
       "data-[state=open]:slide-in-from-right",
     );
   });
@@ -1659,15 +1968,15 @@ describe("shared UI foundation", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Rechercher un utilisateur" }), {
       target: { value: "unknown" },
     });
-    expect(await screen.findByText("Aucun rÃƒÂ©sultat")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "RÃƒÂ©initialiser" })).toBeInTheDocument();
+    expect(await screen.findByText("Aucun résultat")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Réinitialiser" })).toBeInTheDocument();
 
     render(
       <QueryClientProvider client={queryClient}>
         <ProfileView />
       </QueryClientProvider>,
     );
-    expect(screen.getByRole("heading", { name: "Profil et sÃƒÂ©curitÃƒÂ©" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Profil et sécurité" })).toBeInTheDocument();
     const showCurrent = screen.getByRole("button", { name: "Afficher mot de passe actuel" });
     fireEvent.click(showCurrent);
     expect(screen.getByLabelText("Mot de passe actuel")).toHaveAttribute("type", "text");
@@ -1699,7 +2008,7 @@ describe("shared UI foundation", () => {
           id: "machine-1",
           name: "CNC-06",
           internalNumber: "CNC-06",
-          type: "DÃ©coupe",
+          type: "Découpe",
           status: "ACTIVE",
           description: null,
           location: "Atelier A",
@@ -1735,9 +2044,9 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByRole("heading", { name: "CNC-06" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copier le numÃƒÂ©ro" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copier le numéro" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Actualiser" })).toBeInTheDocument();
-    expect(screen.getByText("Barres regroupÃƒÂ©es par profil")).toBeInTheDocument();
+    expect(screen.getByText("Barres regroupées par profil")).toBeInTheDocument();
   });
 
   it("lets a manager release an unstarted bar from a machine in maintenance", async () => {
@@ -1746,7 +2055,7 @@ describe("shared UI foundation", () => {
         id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", type: "Cutting",
         status: "MAINTENANCE", description: null, location: "Workshop",
         createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
-        activeOperationCount: 0, queue: [],
+        activeOperationCount: 0, activeProductionRunCount: 0, queue: [],
         queuePagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 },
         assignedBarCount: 1,
         cuttingBars: [{
@@ -1782,7 +2091,7 @@ describe("shared UI foundation", () => {
         id: "machine-1", name: "CNC-06", internalNumber: "CNC-06", type: "Cutting",
         status: "MAINTENANCE", description: null, location: "Workshop",
         createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
-        activeOperationCount: 0, queue: [],
+        activeOperationCount: 0, activeProductionRunCount: 0, queue: [],
         queuePagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 },
         assignedBarCount: 3,
         cuttingBars: [
@@ -1838,8 +2147,8 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("Aucune barre faÃƒÂ§onnÃƒÂ©e")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Ouvrir le faÃƒÂ§onnage/ })).toHaveAttribute(
+    expect(await screen.findByText("Aucune barre façonnée")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Ouvrir le façonnage/ })).toHaveAttribute(
       "href",
       "/offers/offer-1/faconnage",
     );
@@ -1900,22 +2209,22 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Imprimer le rapport matiÃ¨re" }));
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Imprimer le rapport matière" }));
     await waitFor(() => expect(popup.document.write).toHaveBeenCalled());
     const html = vi.mocked(popup.document.write).mock.calls.at(-1)?.[0] as string;
     expect(html).toContain("Poids brut");
     expect(html).toContain("Chute");
     expect(html).toContain("268,8 kg");
     expect(html).toContain("143,4 kg");
-    expect(html).toContain("Poids net piÃ¨ces");
-    expect(html).toContain("Poids brut matiÃ¨re");
-    expect(html).not.toContain("RepÃ¨res de barres");
-    expect(html).not.toContain("Ã€ confirmer avant commande");
-    expect(html).toContain("DÃ©tail de coupe et ressources par barre");
-    expect(html).toContain("SchÃ©ma de coupe");
-    expect(html).toContain("OFF-001-B001â€“OFF-001-B002");
+    expect(html).toContain("Poids net pièces");
+    expect(html).toContain("Poids brut matière");
+    expect(html).not.toContain("Repères de barres");
+    expect(html).not.toContain("À confirmer avant commande");
+    expect(html).toContain("Détail de coupe et ressources par barre");
+    expect(html).toContain("Schéma de coupe");
+    expect(html).toContain("OFF-001-B001–OFF-001-B002");
     expect(html).toContain("2 barres");
-    expect(html).toContain("P-001 Â· 1, P-002 Â· 1");
+    expect(html).toContain("P-001 · 1, P-002 · 1");
     openSpy.mockRestore();
   });
 
@@ -1943,14 +2252,14 @@ describe("shared UI foundation", () => {
         <PiecesView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByRole("heading", { name: "PiÃƒÂ¨ces" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Pièces" })).toBeInTheDocument();
     expect((await screen.findAllByText("CMD-001")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("S275JR").length).toBeGreaterThan(0);
     expect(screen.getAllByText("POUTRE").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pds Tot").length).toBeGreaterThan(0);
   });
 
-  it("shows the Offer-local next RepÃƒÂ¨re and marks quality and designation optional", async () => {
+  it("shows the Offer-local next Repère and marks quality and designation optional", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1959,10 +2268,10 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByText(/appartiennent uniquement/)).toHaveTextContent(/affaire/);
-    await user.click((await screen.findAllByRole("button", { name: /Ajouter une piÃ¨ce/i }))[0]);
-    expect(await screen.findByText(/Prochain repÃ¨re proposÃ© :/)).toHaveTextContent("P-014");
-    expect(screen.getByLabelText("QualitÃ© (facultative)")).toBeInTheDocument();
-    expect(screen.getByLabelText("DÃ©signation (facultative)")).toBeInTheDocument();
+    await user.click((await screen.findAllByRole("button", { name: /Ajouter une pièce/i }))[0]);
+    expect(await screen.findByText(/Prochain repère proposé :/)).toHaveTextContent("P-014");
+    expect(screen.getByLabelText("Qualité (facultative)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Désignation (facultative)")).toBeInTheDocument();
     expect(getOfferNextPieceReferenceRequest).toHaveBeenCalledWith("offer-1");
   });
 
@@ -1988,22 +2297,22 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    await user.click((await screen.findAllByRole("button", { name: /Ajouter une piÃƒÂ¨ce/i }))[0]);
+    await user.click((await screen.findAllByRole("button", { name: /Ajouter une pièce/i }))[0]);
     const profileInput = await screen.findByPlaceholderText("IPE200");
     await user.click(profileInput);
     await user.click(await screen.findByRole("option", { name: "HEA100" }));
     expect(screen.getByText(/16,7 kg\/m/)).toBeInTheDocument();
-    expect(screen.getByText(/Longueurs brutes disponibles pour le faÃƒÂ§onnage/)).toBeInTheDocument();
+    expect(screen.getByText(/Longueurs brutes disponibles pour le façonnage/)).toBeInTheDocument();
     expect(screen.getByText(/6\s?000 mm/)).toBeInTheDocument();
     expect(screen.getByText(/12\s?100 mm/)).toBeInTheDocument();
     expect(screen.getByText(/15\s?100 mm/)).toBeInTheDocument();
     const lengthInput = screen.getByLabelText("Longueur *");
     await user.clear(lengthInput);
     await user.type(lengthInput, "3200");
-    const weightInput = screen.getByLabelText("Poids linÃƒÂ©ique (kg/m)");
+    const weightInput = screen.getByLabelText("Poids linéique (kg/m)");
     expect(weightInput).toHaveValue(16.7);
     expect(screen.getByLabelText("Poids total")).toHaveValue("53,44");
-    expect(screen.getByText("Catalogue Ã‚Â· modifiable")).toBeInTheDocument();
+    expect(screen.getByText("Catalogue · modifiable")).toBeInTheDocument();
 
     await user.clear(weightInput);
     await user.type(weightInput, "70");
@@ -2013,7 +2322,7 @@ describe("shared UI foundation", () => {
     expect(weightInput).toHaveValue(70);
     expect(screen.getByLabelText("Poids total")).toHaveValue("280");
     expect(screen.getByText("Saisi manuellement")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Ajouter la piÃƒÂ¨ce/i }));
+    await user.click(screen.getByRole("button", { name: /Ajouter la pièce/i }));
     await waitFor(() =>
       expect(createOfferPieceRequest).toHaveBeenCalledWith(
         "offer-1",
@@ -2047,20 +2356,20 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    await user.click((await screen.findAllByRole("button", { name: /Ajouter une piÃƒÂ¨ce/i }))[0]);
+    await user.click((await screen.findAllByRole("button", { name: /Ajouter une pièce/i }))[0]);
     const profileInput = await screen.findByPlaceholderText("IPE200");
     await user.click(profileInput);
     await user.click(await screen.findByRole("option", { name: "HEA100" }));
     await user.type(screen.getByLabelText("Longueur *"), "3200");
-    await user.clear(screen.getByLabelText("QuantitÃƒÂ© *"));
-    await user.type(screen.getByLabelText("QuantitÃƒÂ© *"), "2");
+    await user.clear(screen.getByLabelText("Quantité *"));
+    await user.type(screen.getByLabelText("Quantité *"), "2");
     await user.click(screen.getByRole("button", { name: "Ajouter une longueur" }));
-    await user.type(screen.getByLabelText("Longueur Ã‚Â· piÃƒÂ¨ce 2"), "5000");
-    await user.clear(screen.getByLabelText("QuantitÃƒÂ©"));
-    await user.type(screen.getByLabelText("QuantitÃƒÂ©"), "3");
+    await user.type(screen.getByLabelText("Longueur · pièce 2"), "5000");
+    await user.clear(screen.getByLabelText("Quantité"));
+    await user.type(screen.getByLabelText("Quantité"), "3");
 
     expect(screen.getByLabelText("Poids total")).toHaveValue("357,38");
-    await user.click(screen.getByRole("button", { name: /Ajouter la piÃƒÂ¨ce/i }));
+    await user.click(screen.getByRole("button", { name: /Ajouter la pièce/i }));
     await waitFor(() =>
       expect(createOfferPiecesBatchRequest).toHaveBeenCalledWith("offer-1", {
         pieces: [
@@ -2093,13 +2402,13 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    const addButton = (await screen.findAllByRole("button", { name: /Ajouter une piÃƒÂ¨ce/i }))[0];
+    const addButton = (await screen.findAllByRole("button", { name: /Ajouter une pièce/i }))[0];
     expect(addButton).toBeEnabled();
     expect(
-      screen.queryByText(/le plan validÃƒÂ© protÃƒÂ¨ge les donnÃƒÂ©es des piÃƒÂ¨ces/i),
+      screen.queryByText(/le plan validé protège les données des pièces/i),
     ).not.toBeInTheDocument();
     await user.click(addButton);
-    expect(await screen.findByRole("heading", { name: "Ajouter une piÃƒÂ¨ce" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Ajouter une pièce" })).toBeInTheDocument();
   });
 
   it("allows editing untouched pieces in production but protects pieces already started", async () => {
@@ -2151,7 +2460,7 @@ describe("shared UI foundation", () => {
 
     expect(
       await screen.findByText(
-        /vous pouvez modifier une piÃƒÂ¨ce tant que toutes ses unitÃƒÂ©s sont encore en attente/i,
+        /vous pouvez modifier une pièce tant que toutes ses unités sont encore en attente/i,
       ),
     ).toBeInTheDocument();
     await user.click((await screen.findAllByRole("button", { name: "Actions CMD-001" }))[0]);
@@ -2160,7 +2469,7 @@ describe("shared UI foundation", () => {
     await user.keyboard("{Escape}");
     await user.click((await screen.findAllByRole("button", { name: "Actions CMD-002" }))[0]);
     expect(
-      await screen.findByRole("menuitem", { name: /Certaines unitÃƒÂ©s sont engagÃƒÂ©es/ }),
+      await screen.findByRole("menuitem", { name: /Certaines unités sont engagées/ }),
     ).toHaveAttribute("aria-disabled", "true");
   });
 
@@ -2173,10 +2482,10 @@ describe("shared UI foundation", () => {
         <PiecesView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText(/1Ã¢â‚¬â€œ1 sur 1 piÃƒÂ¨ce/)).toBeInTheDocument();
+    expect(await screen.findByText(/1–1 sur 1 pièce/)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Filtrer par profil" })).toBeInTheDocument();
     expect(
-      screen.getByRole("searchbox", { name: "Rechercher par repÃƒÂ¨re, profil ou dÃƒÂ©signation" }),
+      screen.getByRole("searchbox", { name: "Rechercher par repère, profil ou désignation" }),
     ).toBeInTheDocument();
     expect(getPieceFacetsRequest).not.toHaveBeenCalled();
     const scrollIntoView = Element.prototype.scrollIntoView;
@@ -2210,7 +2519,7 @@ describe("shared UI foundation", () => {
       "pieces.csv",
       { type: "text/csv" },
     );
-    fireEvent.change(screen.getByLabelText("Fichier Tekla des piÃƒÂ¨ces"), {
+    fireEvent.change(screen.getByLabelText("Fichier Tekla des pièces"), {
       target: { files: [file] },
     });
     expect(await screen.findByText("pieces.csv")).toBeInTheDocument();
@@ -2242,11 +2551,11 @@ describe("shared UI foundation", () => {
     await user.click(await screen.findByRole("button", { name: "Analyser et continuer" }));
 
     expect(await screen.findByRole("alertdialog")).toHaveTextContent(/jarret/i);
-    await user.click(screen.getByRole("button", { name: /Jâ€™ai vÃ©rifiÃ©/ }));
+    await user.click(screen.getByRole("button", { name: /J’ai vérifié/ }));
     expect(screen.getByRole("button", { name: /Importer 1/ })).toBeEnabled();
   });
 
-  it("opens FaÃ§onnage profile groups and stacks raw-length cards", async () => {
+  it("opens Façonnage profile groups and stacks raw-length cards", async () => {
     vi.mocked(prepareOfferFaconnageRequest).mockResolvedValueOnce({
       preparation: {
         preparationId: "prep-1",
@@ -2321,7 +2630,7 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    const continueButton = await screen.findByRole("button", { name: "Continuer vers FaÃƒÂ§onnage" });
+    const continueButton = await screen.findByRole("button", { name: "Continuer vers Façonnage" });
     expect(continueButton.parentElement?.parentElement).toHaveClass("sticky");
     await userEvent.click(await screen.findByRole("button", { name: "Supprimer le reliquat" }));
     expect(
@@ -2355,10 +2664,10 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText(/faÃƒÂ§onnage est verrouillÃƒÂ©/)).toBeInTheDocument();
+    expect(await screen.findByText(/façonnage est verrouillé/)).toBeInTheDocument();
     expect(screen.getByText("OFF-001-CP-001")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Revenir Ãƒ  la validation" }),
+      screen.queryByRole("button", { name: "Revenir à la validation" }),
     ).not.toBeInTheDocument();
   });
 
@@ -2370,7 +2679,7 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByRole("heading", { name: "CMD-001" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copier la rÃƒÂ©fÃƒÂ©rence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copier la référence" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Actualiser" })).toBeInTheDocument();
   });
 
@@ -2516,7 +2825,7 @@ describe("shared UI foundation", () => {
     expect((await screen.findAllByText("CMD-001")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("CNC-06").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Nouvelle affectation" }));
-    expect(await screen.findByRole("dialog", { name: "Affecter une unitÃƒÂ©" })).toHaveClass(
+    expect(await screen.findByRole("dialog", { name: "Affecter une unité" })).toHaveClass(
       "data-[state=open]:slide-in-from-right",
     );
   });
@@ -2593,9 +2902,9 @@ describe("shared UI foundation", () => {
         <QualityView />
       </QueryClientProvider>,
     );
-    expect((await screen.findAllByText("UnitÃƒÂ©s en attente")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Unités en attente")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(/CMD-001/)).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("button", { name: /ContrÃƒÂ´ler/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: /Contrôler/ }).length).toBeGreaterThan(0);
   });
 
   it("surfaces an open workshop report directly in the matching offer quality page", async () => {
@@ -2616,7 +2925,7 @@ describe("shared UI foundation", () => {
           machineName: "Scie 01",
           reportedBy: { id: "operator-1", displayName: "Sami" },
           reason: "DIMENSION",
-          comment: "PerÃƒÂ§age dÃƒÂ©calÃƒÂ© cÃƒÂ´tÃƒÂ© gauche.",
+          comment: "Perçage décalé côté gauche.",
           status: "OPEN",
           reportedAt: "2026-01-01T12:00:00.000Z",
         },
@@ -2635,7 +2944,7 @@ describe("shared UI foundation", () => {
       expect.objectContaining({ offerId: "offer-specific" }),
     );
     await userEvent.click(screen.getByRole("button", { name: /Voir les signalements/ }));
-    expect(await screen.findByText("PerÃƒÂ§age dÃƒÂ©calÃƒÂ© cÃƒÂ´tÃƒÂ© gauche.")).toBeInTheDocument();
+    expect(await screen.findByText("Perçage décalé côté gauche.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /CMD-209/ })).toHaveAttribute(
       "href",
       "/offers/offer-specific/pieces/piece-1",
@@ -2671,7 +2980,7 @@ describe("shared UI foundation", () => {
         <QualityView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("1 unitÃƒÂ© correspond Ãƒ  la recherche")).toBeInTheDocument();
+    expect(await screen.findByText("1 unité correspond à la recherche")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Historique" }));
     expect(
       screen.getByRole("combobox", { name: /Filtrer les d.cisions qualit./ }),
@@ -2683,7 +2992,7 @@ describe("shared UI foundation", () => {
     ).toBe(true);
     await user.click(screen.getByRole("tab", { name: /traiter/ }));
     await user.click(screen.getAllByRole("button", { name: /Contr.ler/ })[0]);
-    const qualitySheetTitle = (await screen.findAllByText("ContrÃƒÂ´ler cette unitÃƒÂ©")).find(
+    const qualitySheetTitle = (await screen.findAllByText("Contrôler cette unité")).find(
       (element) => element.tagName === "H2",
     );
     if (!qualitySheetTitle) throw new Error("Expected the quality Sheet title to render");
@@ -2707,7 +3016,7 @@ describe("shared UI foundation", () => {
           result: "NON_CONFORM",
           comment: "Rayure profonde sur la face visible.",
           controllerId: "quality-1",
-          controllerName: "ContrÃƒÂ´leur qualitÃƒÂ©",
+          controllerName: "Contrôleur qualité",
           controlledAt: "2026-01-01T12:00:00.000Z",
           defectCategory: "SURFACE",
           cycle: 1,
@@ -2727,7 +3036,7 @@ describe("shared UI foundation", () => {
             qualityControlId: "control-rejected-1",
             type: "DEVIATION",
             status: "PENDING",
-            reason: "TolÃƒÂ©rance client documentÃƒÂ©e.",
+            reason: "Tolérance client documentée.",
             approvalComment: null,
             requestedById: "manager-1",
             requestedByName: "Manager",
@@ -2747,7 +3056,7 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     await userEvent.click(await screen.findByRole("tab", { name: "Historique" }));
-    expect(await screen.findByText("Photos du dÃƒÂ©faut")).toBeInTheDocument();
+    expect(await screen.findByText("Photos du défaut")).toBeInTheDocument();
     expect(screen.getByAltText("rayure.png")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approuver" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refuser" })).toBeInTheDocument();
@@ -2760,8 +3069,8 @@ describe("shared UI foundation", () => {
         <HistoryView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("Journal des ÃƒÂ©vÃƒÂ©nements")).toBeInTheDocument();
-    expect((await screen.findAllByText("ContrÃƒÂ´le conforme")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Journal des événements")).toBeInTheDocument();
+    expect((await screen.findAllByText("Contrôle conforme")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("Admin")).length).toBeGreaterThan(0);
     expect(
       screen.getByRole("navigation", { name: "Navigation dans les pages" }),
@@ -2795,10 +3104,10 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(
-      (await screen.findAllByText("PrÃƒÂ©paration du faÃƒÂ§onnage crÃƒÂ©ÃƒÂ©e")).length,
+      (await screen.findAllByText("Préparation du façonnage créée")).length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText("PrÃƒÂ©paration de faÃƒÂ§onnage").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("3 profils Ã‚Â· 8 repÃƒÂ¨res Ã‚Â· 17 unitÃƒÂ©s").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Préparation de façonnage").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("3 profils · 8 repères · 17 unités").length).toBeGreaterThan(0);
     expect(screen.queryByText("internal-preparation-uuid")).not.toBeInTheDocument();
   });
 
@@ -2829,7 +3138,7 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(
-      (await screen.findAllByRole("link", { name: "Voir la piÃƒÂ¨ce" })).every(
+      (await screen.findAllByRole("link", { name: "Voir la pièce" })).every(
         (link) => link.getAttribute("href") === "/offers/offer-1/pieces/piece-1",
       ),
     ).toBe(true);
@@ -2838,7 +3147,7 @@ describe("shared UI foundation", () => {
         .getAllByRole("link", { name: "Machine" })
         .every((link) => link.getAttribute("href") === "/machines/machine-1"),
     ).toBe(true);
-    expect(screen.getByText(/1Ã¢â‚¬â€œ1 sur 1 ÃƒÂ©vÃƒÂ©nement/)).toBeInTheDocument();
+    expect(screen.getByText(/1–1 sur 1 événement/)).toBeInTheDocument();
   });
 
   it("shows the material catalogue as a prominent admin settings entry", async () => {
@@ -2848,9 +3157,9 @@ describe("shared UI foundation", () => {
         <SettingsView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByRole("heading", { name: "RÃ©fÃ©rentiel matiÃ¨re" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Référentiel matière" })).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Catalogue des profils matiÃ¨re" }),
+      screen.getByRole("heading", { name: "Catalogue des profils matière" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Ouvrir le catalogue/ })).toHaveAttribute(
       "href",
@@ -2866,15 +3175,15 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(
-      await screen.findByText("PrÃƒÂ©fÃƒÂ©rences dÃ¢â‚¬â„¢affichage et dÃ¢â‚¬â„¢activitÃƒÂ©"),
+      await screen.findByText("Préférences d’affichage et d’activité"),
     ).toBeInTheDocument();
     render(
       <QueryClientProvider client={queryClient}>
         <NotificationsView />
       </QueryClientProvider>,
     );
-    expect(await screen.findByText("BoÃƒÂ®te de rÃƒÂ©ception")).toBeInTheDocument();
-    expect(await screen.findByText("Fabrication de la barre dÃƒÂ©marrÃƒÂ©e")).toBeInTheDocument();
+    expect(await screen.findByText("Boîte de réception")).toBeInTheDocument();
+    expect(await screen.findByText("Fabrication de la barre démarrée")).toBeInTheDocument();
   });
 
   it("acknowledges an inbox item and supports marking all notifications read", async () => {
@@ -2922,7 +3231,7 @@ describe("shared UI foundation", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Rechercher les notifications" }), {
       target: { value: "not-found" },
     });
-    expect(await screen.findByText("Aucun rÃƒÂ©sultat")).toBeInTheDocument();
+    expect(await screen.findByText("Aucun résultat")).toBeInTheDocument();
   });
 
   it("lists and adds a validated material profile with raw length options", async () => {
@@ -2943,12 +3252,12 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText("Catalogue des profils")).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText("DÃ©signation"), "UPN140");
-    await userEvent.type(screen.getByLabelText("Poids linÃ©ique (kg/m)"), "16");
+    await userEvent.type(screen.getByLabelText("Désignation"), "UPN140");
+    await userEvent.type(screen.getByLabelText("Poids linéique (kg/m)"), "16");
     await userEvent.type(screen.getByLabelText("Longueur brute 1"), "12100");
     await userEvent.click(screen.getByRole("button", { name: "Ajouter une longueur" }));
     await userEvent.type(screen.getByLabelText("Longueur brute 2"), "15100");
-    await userEvent.click(screen.getByRole("button", { name: "CrÃ©er le profil" }));
+    await userEvent.click(screen.getByRole("button", { name: "Créer le profil" }));
     await waitFor(() =>
       expect(createMaterialProfileRequest).toHaveBeenCalledWith({
         profile: "UPN140",
@@ -2983,7 +3292,7 @@ describe("shared UI foundation", () => {
     await user.click(screen.getAllByRole("button", { name: "Modifier" })[0]!);
     const designation = document.getElementById("catalog-profile")!;
     expect(designation).toBeEnabled();
-    expect(screen.queryByLabelText("RÃ©fÃ©rence du profil")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Référence du profil")).not.toBeInTheDocument();
     await user.clear(designation);
     await user.type(designation, "IPE200-RENOVE");
     await user.click(screen.getByRole("button", { name: "Enregistrer" }));
@@ -3058,7 +3367,7 @@ describe("shared UI foundation", () => {
     });
     vi.mocked(createClientRequest).mockResolvedValueOnce({
       id: "client-2",
-      name: "Nouvelle SociÃƒÂ©tÃƒÂ©",
+      name: "Nouvelle Société",
       taxId: null,
       phoneNumbers: [],
       emails: [],
@@ -3083,7 +3392,7 @@ describe("shared UI foundation", () => {
     expect(screen.getByRole("columnheader", { name: /Matricule fiscal/ })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: /Affaires/ })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: /Contact/ })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: /Ãƒâ€°tat/ })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /État/ })).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Filtrer les clients par statut" }),
     ).toBeInTheDocument();
@@ -3093,15 +3402,15 @@ describe("shared UI foundation", () => {
     await user.click(clientSort);
     expect(clientSort.closest("th")).toHaveAttribute("aria-sort", "ascending");
     await user.click(screen.getByRole("button", { name: "Nouveau client" }));
-    await user.type(screen.getByLabelText(/Nom \/ raison sociale/), "Nouvelle SociÃƒÂ©tÃƒÂ©");
+    await user.type(screen.getByLabelText(/Nom \/ raison sociale/), "Nouvelle Société");
     await user.type(screen.getByRole("textbox", { name: /Matricule fiscal/ }), "1234567B/B/M/000");
     await user.type(screen.getByRole("textbox", { name: /phone 1/i }), "+216 71 000 000");
     await user.type(screen.getByRole("textbox", { name: /E-mail 1/i }), "contact@nouveau.tn");
-    await user.click(screen.getByRole("button", { name: "CrÃƒÂ©er la fiche" }));
+    await user.click(screen.getByRole("button", { name: "Créer la fiche" }));
 
     await waitFor(() =>
       expect(createClientRequest).toHaveBeenCalledWith({
-        name: "Nouvelle SociÃƒÂ©tÃƒÂ©",
+        name: "Nouvelle Société",
         taxId: "1234567B/B/M/000",
         phoneNumbers: ["+216 71 000 000"],
         emails: ["contact@nouveau.tn"],
@@ -3145,14 +3454,14 @@ describe("shared UI foundation", () => {
     expect(await screen.findByRole("textbox", { name: /Matricule fiscal/ })).toBeRequired();
     expect(screen.getByRole("textbox", { name: /phone 1/i })).toBeRequired();
     expect(screen.getByRole("textbox", { name: /E-mail 1/ })).toBeRequired();
-    await user.click(screen.getByRole("button", { name: "CrÃƒÂ©er la fiche" }));
+    await user.click(screen.getByRole("button", { name: "Créer la fiche" }));
     expect(await screen.findAllByRole("alert")).toHaveLength(4);
 
     await user.type(screen.getByLabelText(/Nom \/ raison sociale/), client.name);
     await user.type(screen.getByRole("textbox", { name: /Matricule fiscal/ }), client.taxId);
     await user.type(screen.getByRole("textbox", { name: /phone 1/i }), client.phoneNumbers[0]!);
     await user.type(screen.getByRole("textbox", { name: /E-mail 1/ }), client.emails[0]!);
-    await user.click(screen.getByRole("button", { name: "CrÃƒÂ©er la fiche" }));
+    await user.click(screen.getByRole("button", { name: "Créer la fiche" }));
 
     await waitFor(() =>
       expect(createClientRequest).toHaveBeenCalledWith({
@@ -3162,9 +3471,9 @@ describe("shared UI foundation", () => {
         emails: client.emails,
       }),
     );
-    await user.type(screen.getByRole("textbox", { name: /RÃƒÂ©fÃƒÂ©rence/ }), "TEST-CLIENT-01");
-    await user.type(screen.getByRole("textbox", { name: /Nom de lÃ¢â‚¬â„¢affaire/ }), "Affaire test");
-    await user.click(screen.getByRole("button", { name: "CrÃƒÂ©er lÃ¢â‚¬â„¢affaire" }));
+    await user.type(screen.getByRole("textbox", { name: /Référence/ }), "TEST-CLIENT-01");
+    await user.type(screen.getByRole("textbox", { name: /Nom de l’affaire/ }), "Affaire test");
+    await user.click(screen.getByRole("button", { name: "Créer l’affaire" }));
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith(
         expect.objectContaining({ clientId: client.id, reference: "TEST-CLIENT-01" }),
@@ -3201,7 +3510,7 @@ describe("shared UI foundation", () => {
         <OfferFormSheet open onOpenChange={vi.fn()} busy={false} onSubmit={vi.fn()} />
       </QueryClientProvider>,
     );
-    const input = await screen.findByRole("combobox", { name: "Client de lâ€™affaire" });
+    const input = await screen.findByRole("combobox", { name: "Client de l’affaire" });
     await user.type(input, "Atelier");
     await user.click(await screen.findByRole("option", { name: /Atelier Sfax.*1234567D/ }));
     expect(await screen.findByText(client.name)).toBeInTheDocument();
@@ -3222,13 +3531,13 @@ describe("shared UI foundation", () => {
       </QueryClientProvider>,
     );
 
-    const siteInput = await screen.findByRole("combobox", { name: "Site de lâ€™affaire" });
+    const siteInput = await screen.findByRole("combobox", { name: "Site de l’affaire" });
     await user.type(siteInput, "Sfa");
     await user.click(await screen.findByRole("option", { name: "Sfax" }));
     expect(siteInput).toHaveValue("Sfax");
     await user.clear(siteInput);
-    await user.type(siteInput, "GabÃ¨s");
-    expect(siteInput).toHaveValue("GabÃ¨s");
+    await user.type(siteInput, "Gabès");
+    expect(siteInput).toHaveValue("Gabès");
   });
 
   it("sends operators from the standard sign-in directly to tablet production", async () => {
@@ -3278,7 +3587,7 @@ describe("shared UI foundation", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Hors connexion");
     Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
     fireEvent(window, new Event("online"));
-    expect(await screen.findByRole("status")).toHaveTextContent("Connexion rÃƒÂ©tablie");
+    expect(await screen.findByRole("status")).toHaveTextContent("Connexion rétablie");
     if (originalOnline) Object.defineProperty(window.navigator, "onLine", originalOnline);
     else Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
   });

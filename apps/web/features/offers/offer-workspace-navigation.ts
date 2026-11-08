@@ -2,6 +2,7 @@ import type { UserRole } from "@nim/types";
 import {
   ArrowRightLeft,
   Box,
+  CalendarClock,
   Factory,
   History,
   LayoutDashboard,
@@ -15,6 +16,7 @@ export const offerWorkspaceNavigation = [
   { key: "faconnage", label: "Façonnage", icon: Scissors, suffix: "/faconnage", roles: ["ADMIN", "PRODUCTION_MANAGER"] },
   { key: "bars", label: "Barres", icon: Box, suffix: "/bars", roles: undefined },
   { key: "bar-assignments", label: "Affectations", icon: ArrowRightLeft, suffix: "/bar-assignments", roles: ["ADMIN", "PRODUCTION_MANAGER"] },
+  { key: "planning", label: "Planning", icon: CalendarClock, suffix: "/planning", roles: ["ADMIN", "PRODUCTION_MANAGER"] },
   { key: "production", label: "Production", icon: Factory, suffix: "/production", roles: undefined },
   { key: "quality", label: "Qualité", icon: ShieldCheck, suffix: "/quality", roles: ["ADMIN", "PRODUCTION_MANAGER", "QUALITY_CONTROLLER"] },
   { key: "history", label: "Historique", icon: History, suffix: "/history", roles: ["ADMIN", "PRODUCTION_MANAGER"] },

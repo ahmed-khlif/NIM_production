@@ -113,7 +113,7 @@ export function AppHeader(): React.ReactNode {
     router.replace("/login");
   };
   return (
-    <header className="sticky top-0 z-30 flex min-h-[76px] items-center justify-between gap-4 border-b border-slate-200/80 bg-white/95 px-5 backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/95 lg:px-8">
+    <header className="sticky top-0 z-40 flex min-h-[76px] items-center justify-between gap-4 border-b border-slate-200/80 bg-white/95 px-5 backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/95 lg:px-8">
       <div className="flex w-full min-w-0 max-w-xl items-center gap-2 pl-12 lg:pl-0">
         {pathname !== "/dashboard" ? (
           <Tooltip>

@@ -40,6 +40,12 @@ import type {
   ProductionNonConformityReason,
   TabletMachineOption,
   TabletProductionRun,
+  ManagedScheduleEvent,
+  ScheduleBatchPreview,
+  ScheduleOfferDay,
+  ScheduleBatchWrite,
+  ScheduleBoard,
+  ScheduleEventType,
 } from "@nim/types";
 
 export type OfferStatus = "DRAFT" | "READY" | "IN_PRODUCTION" | "COMPLETED" | "ARCHIVED";
@@ -225,6 +231,8 @@ export type OfferProductionSummary = {
     pendingQuality: number;
     activeAssignments: number;
     activeOperations: number;
+    activeBarAssignments: number;
+    activeProductionRuns: number;
     productionRate: number;
     completionRate: number;
   };
@@ -855,6 +863,7 @@ export function getMachineQueueRequest(
   queue: MachineDetail["queue"];
   pagination: MachineDetail["queuePagination"];
   activeOperationCount: number;
+  activeProductionRunCount: number;
 }> {
   const params = new URLSearchParams();
   if (options.page) params.set("page", String(options.page));
@@ -995,6 +1004,88 @@ export async function getPlanningPiecesRequest(query: {
     ),
   );
   return { pieces: [first, ...rest].flatMap((result) => result.pieces) };
+}
+
+export type ScheduleBoardQuery = {
+  startAt: string;
+  endAt: string;
+  offerId?: string;
+  machineId?: string;
+  operatorId?: string;
+  status?: "ALL" | "PLANNED" | "CANCELLED";
+  search?: string;
+  unscheduledPage?: number;
+  pageSize?: number;
+};
+
+export type ScheduleEventWrite = {
+  type: ScheduleEventType;
+  title?: string;
+  notes?: string;
+  startAt: string;
+  endAt: string;
+  machineId: string;
+  cuttingBarId?: string;
+  leadOperatorId?: string;
+  helperOperatorIds?: string[];
+};
+
+export type ScheduleBatchPreviewWrite = Omit<ScheduleBatchWrite, "cuttingBarIds"> & {
+  cuttingBarIds?: string[];
+};
+
+export function getScheduleBoardRequest(query: ScheduleBoardQuery): Promise<ScheduleBoard> {
+  const params = new URLSearchParams({ startAt: query.startAt, endAt: query.endAt });
+  if (query.offerId) params.set("offerId", query.offerId);
+  if (query.machineId) params.set("machineId", query.machineId);
+  if (query.operatorId) params.set("operatorId", query.operatorId);
+  if (query.status && query.status !== "PLANNED") params.set("status", query.status);
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.unscheduledPage) params.set("unscheduledPage", String(query.unscheduledPage));
+  if (query.pageSize) params.set("pageSize", String(query.pageSize));
+  return request(`/planning/board?${params.toString()}`);
+}
+
+export function getPlanningFirstEventDateRequest(query: { offerId?: string; machineId?: string } = {}): Promise<{ date: string | null; startAt: string | null }> {
+  const params = new URLSearchParams();
+  if (query.offerId) params.set("offerId", query.offerId);
+  if (query.machineId) params.set("machineId", query.machineId);
+  return request(`/planning/first-event-date${params.size ? `?${params.toString()}` : ""}`);
+}
+
+export function getScheduleEventRequest(id: string): Promise<{ event: ManagedScheduleEvent }> {
+  return request(`/planning/events/${encodeURIComponent(id)}`);
+}
+
+export function getScheduleOfferDayRequest(offerId: string, date: string): Promise<ScheduleOfferDay> {
+  const params = new URLSearchParams({ date });
+  return request(`/planning/offers/${encodeURIComponent(offerId)}/day?${params.toString()}`);
+}
+
+export function createScheduleEventRequest(input: ScheduleEventWrite): Promise<{ event: ManagedScheduleEvent }> {
+  return request("/planning/events", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function previewScheduleBatchRequest(input: ScheduleBatchPreviewWrite): Promise<ScheduleBatchPreview> {
+  return request("/planning/batches/preview", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function createScheduleBatchRequest(input: ScheduleBatchWrite): Promise<{
+  batchId: string;
+  events: ManagedScheduleEvent[];
+}> {
+  return request("/planning/batches", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateScheduleEventRequest(
+  id: string,
+  input: Partial<Pick<ScheduleEventWrite, "title" | "notes" | "startAt" | "endAt" | "leadOperatorId" | "helperOperatorIds">>,
+): Promise<{ event: ManagedScheduleEvent }> {
+  return request(`/planning/events/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function cancelScheduleEventRequest(id: string): Promise<{ event: ManagedScheduleEvent }> {
+  return request(`/planning/events/${encodeURIComponent(id)}/cancel`, { method: "POST" });
 }
 
 export function getOfferPiecesRequest(

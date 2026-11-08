@@ -129,6 +129,54 @@ test.describe("admin authenticated workflows", () => {
     }
   });
 
+  test("uses the Planning date views and scopes the calendar to an Affaire", async ({ page }) => {
+    test.setTimeout(90_000);
+    const apiFailures: string[] = [];
+    page.on("response", (response) => {
+      if (response.url().startsWith("http://localhost:4000/planning/") && response.status() >= 500) {
+        apiFailures.push(`${response.status()} ${response.url()}`);
+      }
+    });
+    await loginAsAdmin(page);
+
+    await page.goto("/planning");
+    await expect(page.getByTestId("planning-calendar")).toBeVisible();
+    await page.getByRole("button", { name: "Semaine" }).click();
+    await expect(page.getByTestId("planning-resource-timeline")).toBeVisible();
+    await page.getByRole("button", { name: "Mois" }).click();
+    await expect(page.getByTestId("planning-month-grid")).toBeVisible();
+    await page.getByRole("button", { name: "Aller à une date dans le planning" }).click();
+    await page.getByRole("dialog", { name: "Choisir une date" }).getByRole("button", { name: "18 novembre 2026" }).click();
+    await expect(page.getByRole("button", { name: "Aller à une date dans le planning" })).toContainText("18/11/2026");
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.getByRole("button", { name: "Nouvel événement" }).click();
+    await page.getByRole("button", { name: "Date de début" }).click();
+    const datePopover = await page.getByRole("dialog", { name: "Choisir une date" }).boundingBox();
+    expect(datePopover).not.toBeNull();
+    expect(datePopover!.x).toBeGreaterThanOrEqual(0);
+    expect(datePopover!.x + datePopover!.width).toBeLessThanOrEqual(600);
+    await page.keyboard.press("Escape");
+    await page.getByRole("combobox", { name: "Heure de début, heure" }).click();
+    await page.getByRole("option", { name: "09" }).click();
+    await expect(page.getByRole("combobox", { name: "Heure de début, heure" })).toContainText("09");
+    await page.getByRole("button", { name: "Fermer" }).click();
+
+    const startAt = new Date("2026-11-01T00:00:00.000Z").toISOString();
+    const endAt = new Date("2026-12-01T00:00:00.000Z").toISOString();
+    const boardResponse = await page.request.get("http://localhost:4000/planning/board", {
+      params: { startAt, endAt },
+    });
+    expect(boardResponse.status()).toBe(200);
+    const board = (await boardResponse.json()) as { offers: Array<{ id: string }> };
+    test.skip(!board.offers[0], "No Affaire is currently eligible for planning in this database.");
+
+    await page.goto(`/offers/${board.offers[0]!.id}/planning`);
+    await expect(page.getByTestId("planning-calendar")).toBeVisible();
+    await expect(page.getByTestId("planning-affair-selector")).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Filtrer par Affaire" })).toHaveCount(0);
+    expect(apiFailures).toEqual([]);
+  });
+
   test("exposes the management dialogs without mutating production data", async ({ page }) => {
     await loginAsAdmin(page);
 

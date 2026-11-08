@@ -15,6 +15,7 @@ const keysByEntity: Record<string, readonly (readonly unknown[])[]> = {
   QUALITY_CONTROL: [["quality"], ["pieces"], ["offer"], ["dashboard"]],
   QUALITY_DISPOSITION: [["quality"], ["pieces"], ["offer"], ["dashboard"]],
   NON_CONFORMITY: [["quality"], ["production"], ["offer"], ["dashboard"]],
+  SCHEDULE_EVENT: [["planning"]],
 };
 
 export function getRealtimeInvalidationKeys(event: RealtimeEvent): readonly (readonly unknown[])[] {

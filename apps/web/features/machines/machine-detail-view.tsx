@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Check,
   Copy,
+  CalendarClock,
   Factory,
   RefreshCw,
   Scissors,
@@ -377,6 +378,14 @@ export function MachineDetailView(): React.ReactNode {
         description={`${machine.internalNumber} · ${machine.type} · ${machine.location ?? "Emplacement non renseigné"}`}
         action={
           <div className="flex flex-wrap items-center gap-2">
+            {canManageBars ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={`/machines/${id}/planning`}>
+                  <CalendarClock className="size-4" />
+                  Planning
+                </Link>
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"
