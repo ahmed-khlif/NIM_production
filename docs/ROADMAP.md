@@ -18,7 +18,7 @@ The dashboard now includes persisted defect-category Pareto, disposition breakdo
 8. Quality control lifecycle — implemented at PieceUnit level with immutable multi-cycle inspections, defect categories/photos, rework, remake, scrap, rejected-unit return to production, and administrator-approved deviations
 9. Traceability/history — implemented with secured paginated/filterable reads and responsive UI
 10. Real metrics dashboard — implemented through `/dashboard/overview`, including shadcn-style machine, status, unit-lifecycle, and priority visualizations plus quality and delivery-risk summaries
-    10.5. Planning calendar — authenticated Big Calendar view backed by persisted piece due dates
+    10.5. Phase 2A Production Planning / Ordonnancement MVP — machine resource day/week calendar, assigned-bar scheduling, and PostgreSQL machine/operator conflict protection
 11. WebSocket realtime — authenticated Socket.IO namespace and post-commit query invalidation implemented; external broker remains required for horizontal scaling
 12. Responsive/PWA polish — manifest, safe GET-only service-worker shell cache, and offline banner implemented
 13. IndexedDB offline sync/conflicts
@@ -28,6 +28,14 @@ The dashboard now includes persisted defect-category Pareto, disposition breakdo
 16. Recipient notifications — implemented as a persisted, deduplicated inbox separate from append-only History. Business events create notifications in the same transaction; recipients are selected by current role, quality responsibility, active machine session, or explicit account target. Read/unread state is personal, and the header preview links directly to the relevant workflow. Delivery remains in-app only; email/push channels and per-Affaire manager ownership are not configured product capabilities.
 
 Do not skip foundational phases to rush to dashboard UI.
+
+## Phase 2B remaining
+
+- Review the MVP with workshop users before considering bulk scheduling or recurring maintenance templates.
+- Add shift calendars and working-hour rules only after actual shift policies are documented.
+- Consider accessible drag-to-reschedule after server conflict feedback and keyboard controls are designed together.
+- Add schedule-adherence analytics by comparing planned `ScheduleEvent` intervals with actual `ProductionRun` timestamps; never merge planned and actual state.
+- Consider planning-event retention/export only with an approved audit-retention policy. Cancelled schedule events currently remain in the database.
 
 # Shared client directory
 

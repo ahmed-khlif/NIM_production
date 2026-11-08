@@ -37,6 +37,8 @@ Optimization runs the solver before opening its write transaction. Plan/proposal
 
 `GET /offers/:id/production-summary` supports `page`, `pageSize`, `search` (reference/profile) and `status` (`PLANNED`, `ASSIGNED`, `IN_PROGRESS`, `COMPLETED`, `DELAYED`). `pagination.total` follows those row filters; `totals` remains the full-offer production summary.
 
+Offer totals expose `activeBarAssignments` and `activeProductionRuns` from canonical records for the bar cards. `activeAssignments` remains a compatibility count of unit-level assignment rows and can include the PieceUnits represented by those bars; do not add it to the bar count. `activeOperations` counts standalone legacy operations only; operations linked to currently assigned bars are excluded.
+
 ## Auth
 
 POST /auth/login
@@ -65,7 +67,7 @@ There is no public self-registration. New accounts are created by an administrat
 
 ## Machines
 
-`GET /machines/:id` returns an authenticated machine detail with its persisted unit queue, active operation count, currently associated bars, and derived bar metrics (`assigned`, `inProgress`, `fabricatedToday`, `fabricatedTotal`). Its bar list accepts `sortBy` (`profile`, `reference`, `offer`, `rawLengthMm`, `status`) and `sortDirection` (`asc`, `desc`); sorting happens in PostgreSQL before pagination. `GET /machines/:id/releasable-bars` is ADMIN/PRODUCTION_MANAGER-only, requires the machine to be in maintenance, and returns a compact, paginated list of filtered, assigned-but-not-started bars for bulk selection. `GET /machines/:id/queue` exposes the queue projection for queue-focused clients. `GET /machines` includes an `assignedBarCount` derived from active machine-bar assignment records.
+`GET /machines/:id` returns an authenticated machine detail with its standalone unit queue, legacy `activeOperationCount`, canonical `activeProductionRunCount`, currently associated bars, and bar metrics (`assigned`, `inProgress`, `fabricatedToday`, `fabricatedTotal`). The legacy queue/count exclude units attached to an active bar assignment. Bar-in-progress and fabricated metrics derive from `ProductionRun`; assigned-bar counts derive from active `MachineBarAssignment` records. Its bar list accepts `sortBy` (`profile`, `reference`, `offer`, `rawLengthMm`, `status`) and `sortDirection` (`asc`, `desc`); sorting happens in PostgreSQL before pagination. `GET /machines/:id/releasable-bars` is ADMIN/PRODUCTION_MANAGER-only, requires the machine to be in maintenance, and returns a compact, paginated list of filtered, assigned-but-not-started bars for bulk selection. `GET /machines/:id/queue` exposes only the standalone-unit queue and returns both legacy operation and canonical run counts. `GET /machines` includes an `assignedBarCount` derived from active machine-bar assignment records.
 
 GET /machines — Authenticated
 POST /machines — ADMIN or PRODUCTION_MANAGER
@@ -90,7 +92,23 @@ POST `/offers/:offerId/bar-assignments` (ADMIN or PRODUCTION_MANAGER) accepts `{
 
 POST `/offers/:offerId/bars/:barId/unassign` (ADMIN or PRODUCTION_MANAGER) closes assignment history and returns an unstarted bar and its units to the shaped state. It is rejected once the bar has started production. DELETE `/offers/:offerId/bars/:barId` is a soft cancellation only for an unassigned `FACONNEE` bar: memberships are closed, its units return to `PENDING`, and history is retained. No audit or assignment history is hard-deleted.
 
-Production start moves an assigned bar `AFFECTEE → LANCEE`; when all of its member units have completed fabrication, the bar moves to `FABRIQUEE` and stores `fabricatedAt` for reliable daily machine metrics. These bar transitions are derived from existing production operations and do not add an operator login/tablet workflow.
+## Production Planning / Ordonnancement (Phase 2A)
+
+All `/planning` routes require `ADMIN` or `PRODUCTION_MANAGER`.
+
+- `GET /planning/board?startAt=<ISO>&endAt=<ISO>` returns machine resources, scheduled events in the requested range, filter options, and a paginated list of assigned bars without an active production schedule. Optional filters are `offerId`, `machineId`, `operatorId`, `status=PLANNED|CANCELLED|ALL`, `search`, `unscheduledPage`, and `pageSize` (10–100). Date ranges must be increasing and no longer than 32 days. Times are stored as UTC instants and rendered in `Africa/Tunis`.
+- `GET /planning/first-event-date?offerId=<id>&machineId=<id>` returns the earliest active planned event date in `Africa/Tunis`. With no scope it searches globally; an Affaire scope includes that Affaire’s production events, and a machine scope limits results to that machine. It returns `{ date: null, startAt: null }` when no active planned event exists.
+- `GET /planning/offers/:offerId/day?date=YYYY-MM-DD` returns active production reservations belonging to that Affaire which overlap the requested calendar day in `Africa/Tunis`. This is used by the Affaire batch planner to show existing work before confirming a new batch; it does not reserve or block the whole day.
+- `GET /planning/events/:eventId` returns an event and its roster, including removed members for traceability.
+- `POST /planning/events` creates `PRODUCTION`, `MAINTENANCE`, or `MACHINE_BLOCK` events. Production requires a bar in `AFFECTEE`, exactly one active `MachineBarAssignment`, the same machine as that assignment, an active machine, and an active lead operator; helpers are optional. Maintenance/block events require a title and cannot contain a bar or operator roster.
+- `POST /planning/batches/preview` previews an Affaire-wide batch of eligible assigned bars. It returns per-bar serial slots, unavailability reasons, and machine/operator conflicts. An optional list of bar IDs narrows a recalculation after the planner changes the selection.
+- `POST /planning/batches` atomically creates one `ScheduleEvent` and one audit event for every selected bar. The request supplies a shared lead/helper team, start time, estimated minutes per bar, and optional minutes between bars. The server reloads and locks bars, validates their current assignments and machine status, locks all machine/operator resources, rechecks conflicts, then writes the full batch. Any stale bar or conflict rejects the entire batch; realtime publishes only after commit. Batch requests support up to 500 bars.
+- `PATCH /planning/events/:eventId` updates title, notes, interval, or planned production team. The machine and bar are immutable through Planning. Production-event edits are blocked after the bar leaves `AFFECTEE`.
+- `POST /planning/events/:eventId/cancel` changes only the planning record to `CANCELLED`; it preserves the event and roster history. It does not change a bar, unit, machine assignment, MachineSession, or ProductionRun. A stale slot may still be cancelled after physical production starts.
+
+Each write validates and checks conflicts in its transaction. Transaction-scoped PostgreSQL advisory locks are acquired in sorted machine/operator-key order before checking half-open intervals, preventing concurrent writers from booking overlapping machine or operator time. A partial unique index independently enforces one active production schedule per bar. Production scheduling and bar removal take a row lock on `CuttingBar`; assignment removal is rejected while a planned production slot exists. History is written in the same transaction and realtime invalidation is published only after commit. Planning is not a production command; only the tablet workflow starts or finishes a `ProductionRun`.
+
+Only the tablet workflow may start, finish, or cancel an assigned bar. Starting creates a `ProductionRun` and moves the bar and its member units from `AFFECTEE`/`ASSIGNED` to `LANCEE`/`IN_PROGRESS`; finishing the run completes all member units and moves the bar to `FABRIQUEE` in one transaction. A run remains attached to its session, starter, machine and bar for audit. The legacy unit-production routes cannot independently mutate a PieceUnit in an actively assigned bar.
 
 ## Offers (workflow root)
 
@@ -100,7 +118,7 @@ An Offer owns its pieces, imports, cutting plans, production summary, and tracea
 
 The machine and user directory screens accept database-backed `page` (default 1), `pageSize` (10/20/50), `search` (maximum 80 characters), and their supported status/role/active filters. They return `pagination` metadata and summary counts. Legacy unfiltered requests remain available to existing compact machine/user selectors.
 
-Piece-list queries also accept `dueDateFrom`, `dueDateTo`, `priority`, and persisted `status`. The planning calendar uses these filters to request only pieces with due dates in its visible date range, then loads that range in bounded database pages instead of downloading all application pieces.
+Piece-list queries also accept `dueDateFrom`, `dueDateTo`, `priority`, and persisted `status`. These remain piece-delivery fields; the machine scheduler uses `/planning/board` and canonical bar-assignment records instead.
 
 `GET /assignments` accepts `offerId`, `page`, `pageSize` (10/20/50), `search`, and `machineId`; it returns a database-paginated active assignment list plus total/summary counts. `GET /assignments/available-units` applies the same bounded page/search model to the assignment picker. `GET /offers/:offerId/bar-assignments` independently paginates available bars and active assignments with `availablePage`, `assignmentPage`, `pageSize`, and `search`; the UI retains explicit bar selections across pages.
 
@@ -164,12 +182,12 @@ The legacy unit-assignment write path remains for Offers without bar records. On
 
 ## Production
 
-GET /production/current?machineId=:id — ADMIN, PRODUCTION_MANAGER or OPERATOR; returns the authenticated operator's active operation and the selected machine's assigned queue.
-POST /production/start — ADMIN, PRODUCTION_MANAGER or OPERATOR; starts an assigned PieceUnit on its active machine, persists the operator and machine, moves the unit to `IN_PROGRESS`, and records `PRODUCTION_STARTED`.
+GET /production/current?machineId=:id — ADMIN, PRODUCTION_MANAGER or OPERATOR; returns the authenticated operator's standalone legacy operation and the selected machine's standalone-unit queue. Units covered by an active bar assignment are omitted from both projections.
+POST /production/start — ADMIN, PRODUCTION_MANAGER or OPERATOR; starts an assigned standalone PieceUnit on its active machine, persists the operator and machine, moves the unit to `IN_PROGRESS`, and records `PRODUCTION_STARTED`. The legacy queue omits bar-linked assignments. A unit in an active bar assignment returns `409 BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN` and must be started through the operator tablet run API.
 POST /production/:operationId/unit-complete — ADMIN, PRODUCTION_MANAGER or OPERATOR; completes one operation, moves its unit to `QUALITY_PENDING`, and records `PRODUCTION_COMPLETED`.
 POST /production/:operationId/complete — ADMIN, PRODUCTION_MANAGER or OPERATOR; equivalent completion endpoint for the finish action.
 
-The server rejects maintenance/inactive machines, units not assigned to the selected machine, duplicate active operations, concurrent operations by one operator, invalid state transitions, and completion by another operator unless the actor is an administrator or production manager. Pause/resume remains intentionally undefined until the business decision in `OPEN_QUESTIONS.md` is resolved.
+Both legacy completion routes reject a PieceUnit in an active bar assignment with `409 BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN`; they never transition a CuttingBar. The server also rejects maintenance/inactive machines, units not assigned to the selected machine, duplicate active operations, concurrent operations by one operator, invalid state transitions, and completion by another operator unless the actor is an administrator or production manager. Legacy transactions use serializable isolation and optimistic unit/operation updates; concurrent conflicts return a stable `409`. Historical ProductionOperation rows are retained. Pause/resume remains intentionally undefined until the business decision in `OPEN_QUESTIONS.md` is resolved.
 
 ## Quality
 
@@ -198,9 +216,9 @@ History reads return `{ events, page, pageSize, total, totalPages }`. History ev
 
 ## Dashboard
 
-The overview endpoint accepts an optional validated `days` query parameter (`7` to `90`, default `14`). It returns daily production and quality trend points calculated from persisted production-operation and quality-control timestamps. Status, delivery, quality, and trend aggregates are calculated in one PostgreSQL query; the aggregate snapshot is coalesced and cached in-process for at most three seconds. Committed realtime domain events invalidate that cache; piece/import and machine writes publish their invalidation events after their transactions commit. Piece progress and machine queue projections use filtered counts rather than loading every unit or assignment ID. Access remains restricted to administrators and production managers.
+The overview endpoint accepts an optional validated `days` query parameter (`7` to `90`, default `14`). Production trends count member units from persisted `ProductionRun` bar records and include standalone `ProductionOperation` events only when no bar assignment covered that event time. Machine load compares bars waiting in active assignments with running `ProductionRun` records. This prevents a unit mirrored by a bar assignment from appearing as a second standalone production event. Quality trends use persisted quality-control timestamps. Status, delivery, quality, and trend aggregates are calculated in one PostgreSQL query; the aggregate snapshot is coalesced and cached in-process for at most three seconds. Committed realtime domain events invalidate that cache; piece/import and machine writes publish their invalidation events after their transactions commit. Piece progress and machine queue projections use filtered counts rather than loading every unit or assignment ID. Access remains restricted to administrators and production managers.
 
-GET /dashboard/overview — ADMIN or PRODUCTION_MANAGER; returns persisted summary KPIs, machine load, piece-status breakdown, unit-lifecycle breakdown, priority breakdown, quality summary, delivery-risk summary, recent history activity, delayed pieces, and active pieces. The manager Planning Calendar reuses the authenticated `/pieces` projection for due-date events.
+GET /dashboard/overview — ADMIN or PRODUCTION_MANAGER; returns persisted summary KPIs, machine load, piece-status breakdown, unit-lifecycle breakdown, priority breakdown, quality summary, delivery-risk summary, recent history activity, delayed pieces, and active pieces. Production execution metrics remain based on canonical assignments and `ProductionRun`; planning slots are not counted as completed production.
 
 The dashboard counts production progress from PieceUnit state, calculates quality conformity and defect/disposition analytics from persisted quality rows, and calculates delivery risk from active piece due dates. The read-only metrics endpoint is the single source for the shadcn-style dashboard charts; mutations continue to use their domain endpoints.
 

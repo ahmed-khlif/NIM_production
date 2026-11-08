@@ -12,7 +12,7 @@ Dashboard: bespoke workshop overview with fabrication progress, in-progress unit
 
 Global shell: persisted light/dark/system theme toggle in the authenticated header, token-based dark surfaces for shared Shadcn components, readable legacy feature screens, and accessible labels.
 
-Dashboard, Planning Calendar, Pieces List, Create/Edit Piece, Piece Detail, Import, Import Preview, Profils à traiter / Façonnage preparation, Assignment Board, Reassignment, Machines List/Detail, Delayed Pieces, Production Monitor, History Search, Piece Timeline, Operator History, Machine History.
+Dashboard, Machine Resource Planning (Day/Week/Month), Offer Planning, Machine Planning, Schedule Create/Edit, Schedule Detail/Cancel, Unscheduled Bars, Pieces List, Create/Edit Piece, Piece Detail, Import, Import Preview, Profils à traiter / Façonnage preparation, Assignment Board, Reassignment, Machines List/Detail, Delayed Pieces, Production Monitor, History Search, Piece Timeline, Operator History, Machine History.
 
 ## Operator
 
@@ -63,7 +63,7 @@ Implemented now: Dashboard metric hierarchy focused on production progress, work
 
 Implemented now: Quality analytics with defect Pareto, treatment-decision breakdown, pending-deviation count, persisted API sourcing, and responsive chart empty states.
 
-Implemented now: Planning Calendar using `react-big-calendar`, authenticated persisted piece due dates, priority/delay event styling, piece-detail navigation, and responsive agenda/month views.
+Implemented now: Production Planning / Ordonnancement MVP with a custom machine-row day/week timeline and month grid, paginated unscheduled assigned bars, Affaire/machine/operator/status filters, right-side shadcn create/edit/detail Sheets, cancel confirmation, responsive mobile event list, UTC persistence/Africa-Tunis display, permission-aware global/Offer/machine routes, and API conflict protection. Planned crew remains separate from live MachineSession membership and actual ProductionRun state.
 
 Implemented now: Profile and password change with authenticated account context, server-side password validation, Argon2id persistence, session protection, password visibility toggles, confirmation matching, explicit password guidance, success/error feedback, and responsive layout.
 

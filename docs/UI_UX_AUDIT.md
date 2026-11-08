@@ -224,3 +224,16 @@ The Affaire form previously accepted unrelated free-typed client names, which fr
 - Shared sheet and dialog tests cover these responsive width contracts. Existing route-level browser coverage checks the primary authenticated pages at 375px and 768px; offer-specific workflows and operator tablet states still need separate visual walkthroughs.
 - Browser verification now walks the primary authenticated pages—including clients, global search, profile catalogue, and a machine detail—at 375px and 768px. The Offer workspace checks all nine tabs at both widths. The walkthrough exposed a login illustration overlay that intercepted the submit click; the decorative panel is now pointer-inert and covered by a regression test. E2E navigation labels were updated to the current Affaire terminology.
 - Updated the piece-list and Tekla-import labels from “Offre” to “Affaire” so the screen copy matches the workspace navigation and current business terminology.
+
+### Dashboard analytics and data accuracy — 2026-11-06
+
+- Reorganized operational analytics into Production, Machines, Flux, and Qualité tabs so only the selected chart group mounts. The persisted dataset now appears as a production area trend, a daily activity heatmap, a machine-load bar comparison, a unit-status donut, quality trend lines, a defect radar when at least three categories exist, and supporting status/priority/disposition breakdowns.
+- Kept chart empty states and visible text summaries; the machine chart explicitly compares observed queue and running counts without implying machine capacity.
+- Split the dashboard's active-piece and overdue previews into separate bounded API queries. Active work excludes completed/archived pieces, overdue rows are selected by due date, and the alert count comes from the full database aggregate rather than the capped preview.
+- Focused dashboard UI/API regression coverage was updated. This does not replace full production lifecycle E2E, visual review on physical tablets, or production-shaped performance measurement.
+
+### Dashboard chart layout correction — 2026-11-07
+
+- The analytics tabs remain fully visible below the sticky application header while scrolling through the chart section.
+- The production activity heatmap uses weekday columns and week rows, two-letter weekday labels with accessible full names, and a bounded scroll area for long ranges. This avoids oversized two-column tiles in the narrow workshop-rhythm card.
+- Daily production counts use step-shaped area transitions so the chart does not suggest smooth activity between separate daily totals.
