@@ -36,6 +36,114 @@ export type ManagedMachine = {
   assignedBarCount?: number;
 };
 
+export type ScheduleEventType = "PRODUCTION" | "MAINTENANCE" | "MACHINE_BLOCK";
+export type ScheduleEventStatus = "PLANNED" | "CANCELLED";
+export type ScheduleOperatorRole = "LEAD" | "HELPER";
+
+export type ManagedScheduleEvent = {
+  id: string;
+  type: ScheduleEventType;
+  status: ScheduleEventStatus;
+  title: string;
+  notes: string | null;
+  startAt: string;
+  endAt: string;
+  cancelledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  machine: Pick<ManagedMachine, "id" | "name" | "internalNumber" | "status">;
+  bar: null | {
+    id: string;
+    reference: string;
+    profile: string;
+    rawLengthMm: number;
+    status: CuttingBarStatus;
+    offer: { id: string; reference: string; name: string };
+  };
+  operators: Array<{
+    id: string;
+    displayName: string;
+    role: ScheduleOperatorRole;
+    active: boolean;
+  }>;
+  createdBy: { id: string; displayName: string };
+  cancelledBy: { id: string; displayName: string } | null;
+};
+
+export type ManagedScheduleBar = {
+  id: string;
+  reference: string;
+  profile: string;
+  rawLengthMm: number;
+  offer: { id: string; reference: string; name: string };
+  machine: Pick<ManagedMachine, "id" | "name" | "internalNumber" | "status">;
+  assignedAt: string;
+};
+
+export type ManagedScheduleBatchBar = ManagedScheduleBar & {
+  startAt: string | null;
+  endAt: string | null;
+  selectable: boolean;
+  blockedReason: string | null;
+};
+
+export type ScheduleBatchPreview = {
+  offer: { id: string; reference: string; name: string };
+  startAt: string;
+  durationMinutes: number;
+  gapMinutes: number;
+  bars: ManagedScheduleBatchBar[];
+  conflicts: Array<{
+    barId: string;
+    barReference: string;
+    machineId: string;
+    machineName: string;
+    eventTitle: string;
+    startAt: string;
+    endAt: string;
+    reason: "MACHINE_OVERLAP" | "OPERATOR_OVERLAP";
+    resourceType: "MACHINE" | "OPERATOR";
+    resourceLabel: string;
+    conflictingEventStartAt: string;
+    conflictingEventEndAt: string;
+    conflictingBarReference: string | null;
+  }>;
+};
+
+export type ScheduleOfferDay = {
+  offer: { id: string; reference: string; name: string };
+  date: string;
+  events: Array<{
+    id: string;
+    title: string;
+    startAt: string;
+    endAt: string;
+    machine: Pick<ManagedMachine, "id" | "name" | "internalNumber">;
+    bar: { id: string; reference: string; profile: string } | null;
+    operators: Array<{ id: string; displayName: string; role: ScheduleOperatorRole }>;
+  }>;
+};
+
+export type ScheduleBatchWrite = {
+  offerId: string;
+  cuttingBarIds: string[];
+  startAt: string;
+  durationMinutes: number;
+  gapMinutes: number;
+  leadOperatorId: string;
+  helperOperatorIds: string[];
+};
+
+export type ScheduleBoard = {
+  events: ManagedScheduleEvent[];
+  machines: Array<Pick<ManagedMachine, "id" | "name" | "internalNumber" | "type" | "status">>;
+  offers: Array<{ id: string; reference: string; name: string }>;
+  operators: Array<{ id: string; displayName: string }>;
+  unscheduledBars: ManagedScheduleBar[];
+  unscheduledPagination: PageMetadata;
+  range: { startAt: string; endAt: string; timeZone: "Africa/Tunis" };
+};
+
 export type PieceStatus =
   "PLANNED" | "ASSIGNED" | "IN_PROGRESS" | "COMPLETED" | "DELAYED" | "ARCHIVED";
 export type PiecePriority = "HIGH" | "NORMAL" | "LOW";
@@ -397,6 +505,7 @@ export type MachineDetail = ManagedMachine & {
   queue: ProductionQueueItem[];
   queuePagination: PageMetadata;
   activeOperationCount: number;
+  activeProductionRunCount: number;
   cuttingBars: MachineCuttingBar[];
   cuttingBarsPagination: PageMetadata;
   barMetrics: {

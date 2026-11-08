@@ -111,6 +111,16 @@ export class ProductionService {
       where: {
         operatorId: actor.user.id,
         status: "IN_PROGRESS",
+        NOT: {
+          pieceUnit: {
+            barMemberships: {
+              some: {
+                active: true,
+                cuttingBar: { is: { assignments: { some: { active: true } } } },
+              },
+            },
+          },
+        },
         ...(offerId ? { piece: { offerId } } : {}),
       },
       include: operationInclude,
@@ -121,8 +131,17 @@ export class ProductionService {
           where: {
             machineId: parsed.data.machineId,
             active: true,
+            barAssignmentId: null,
             pieceUnit: {
               status: "ASSIGNED",
+              NOT: {
+                barMemberships: {
+                  some: {
+                    active: true,
+                    cuttingBar: { is: { assignments: { some: { active: true } } } },
+                  },
+                },
+              },
               ...(offerId ? { piece: { offerId } } : {}),
             },
           },
@@ -149,189 +168,189 @@ export class ProductionService {
     }
 
     try {
-      const result = await this.prisma.$transaction(async (transaction) => {
-        const [unit, machine, assignment, activeOperatorOperation] = await Promise.all([
-          transaction.pieceUnit.findUnique({
-            where: { id: parsed.data.pieceUnitId },
-            include: { piece: true },
-          }),
-          transaction.machine.findUnique({ where: { id: parsed.data.machineId } }),
-          transaction.assignment.findFirst({
-            where: {
-              pieceUnitId: parsed.data.pieceUnitId,
-              machineId: parsed.data.machineId,
-              active: true,
-            },
-          }),
-          transaction.productionOperation.findFirst({
-            where: { operatorId: actor.user.id, status: "IN_PROGRESS" },
-            select: { id: true },
-          }),
-        ]);
-
-        if (!unit) {
-          throw new NotFoundException({
-            code: "PIECE_UNIT_NOT_FOUND",
-            message: "Unité de pièce introuvable.",
-          });
-        }
-        if (!machine) {
-          throw new NotFoundException({
-            code: "MACHINE_NOT_FOUND",
-            message: "Machine introuvable.",
-          });
-        }
-        if (machine.status !== "ACTIVE") {
-          throw new ConflictException({
-            code:
-              machine.status === "MAINTENANCE" ? "MACHINE_IN_MAINTENANCE" : "MACHINE_UNAVAILABLE",
-            message: "Cette machine ne peut pas démarrer une nouvelle production.",
-          });
-        }
-        if (!assignment) {
-          throw new ConflictException({
-            code: "UNIT_NOT_ASSIGNED_TO_MACHINE",
-            message: "Cette unité n'est pas affectée à la machine sélectionnée.",
-          });
-        }
-        if (unit.status !== "ASSIGNED") {
-          throw new ConflictException({
-            code:
-              unit.status === "IN_PROGRESS"
-                ? "UNIT_ALREADY_IN_PRODUCTION"
-                : "INVALID_STATE_TRANSITION",
-            message: "Cette unité ne peut pas démarrer dans son état actuel.",
-          });
-        }
-        if (unit.piece.status === "ARCHIVED" || unit.piece.status === "COMPLETED") {
-          throw new ConflictException({
-            code: "PIECE_NOT_IN_PRODUCTION",
-            message: "Cette pièce ne peut plus démarrer de production.",
-          });
-        }
-        const offer = await transaction.offer.findUnique({
-          where: { id: unit.piece.offerId },
-          select: { id: true, reference: true, status: true },
-        });
-        if (!offer || !["READY", "IN_PRODUCTION"].includes(offer.status)) {
-          throw new ConflictException({
-            code: "OFFER_NOT_READY_FOR_PRODUCTION",
-            message: "L’offre doit disposer d’un plan validé avant de démarrer la production.",
-          });
-        }
-        if (activeOperatorOperation) {
-          throw new ConflictException({
-            code: "OPERATOR_ALREADY_IN_PRODUCTION",
-            message: "Terminez l'opération en cours avant d'en démarrer une autre.",
-          });
-        }
-
-        const startedAt = new Date();
-        const operation = await transaction.productionOperation.create({
-          data: {
-            pieceId: unit.pieceId,
-            pieceUnitId: unit.id,
-            machineId: machine.id,
-            operatorId: actor.user.id,
-            startedAt,
-          },
-          include: operationInclude,
-        });
-        await transaction.pieceUnit.update({
-          where: { id: unit.id },
-          data: {
-            status: "IN_PROGRESS",
-            productionStatus: "LANCEE",
-            currentOperatorId: actor.user.id,
-            startedAt,
-            version: { increment: 1 },
-          },
-        });
-        const barItem = await transaction.cuttingBarItem.findFirst({
-          where: { pieceUnitId: unit.id, active: true },
-          include: { cuttingBar: true },
-        });
-        if (barItem && barItem.cuttingBar.status === "AFFECTEE") {
-          const barTransition = await transaction.cuttingBar.updateMany({
-            where: { id: barItem.cuttingBarId, status: "AFFECTEE" },
-            data: { status: "LANCEE" },
-          });
-          if (barTransition.count === 1) {
-            const barStartedEvent = await transaction.historyEvent.create({
-              data: {
-                eventType: "BAR_PRODUCTION_STARTED",
-                entityType: "CUTTING_BAR",
-                entityId: barItem.cuttingBarId,
-                actorUserId: actor.user.id,
-                actorRole: actor.user.role,
-                metadata: {
-                  offerId: unit.piece.offerId,
-                  pieceUnitId: unit.id,
-                  previousStatus: "AFFECTEE",
-                  newStatus: "LANCEE",
-                  machineId: machine.id,
-                },
+      const result = await this.prisma.$transaction(
+        async (transaction) => {
+          const [unit, machine, assignment, activeOperatorOperation] = await Promise.all([
+            transaction.pieceUnit.findUnique({
+              where: { id: parsed.data.pieceUnitId },
+              include: { piece: true },
+            }),
+            transaction.machine.findUnique({ where: { id: parsed.data.machineId } }),
+            transaction.assignment.findFirst({
+              where: {
+                pieceUnitId: parsed.data.pieceUnitId,
+                machineId: parsed.data.machineId,
+                active: true,
               },
+            }),
+            transaction.productionOperation.findFirst({
+              where: { operatorId: actor.user.id, status: "IN_PROGRESS" },
+              select: { id: true },
+            }),
+          ]);
+
+          if (!unit) {
+            throw new NotFoundException({
+              code: "PIECE_UNIT_NOT_FOUND",
+              message: "Unité de pièce introuvable.",
             });
-            await deliverBusinessNotification(transaction, barStartedEvent, { offerId: unit.piece.offerId, machineId: machine.id });
           }
-        }
-        const nextPieceStatus =
-          unit.piece.status === "ASSIGNED" ? "IN_PROGRESS" : unit.piece.status;
-        if (nextPieceStatus !== unit.piece.status) {
-          await transaction.piece.update({
-            where: { id: unit.pieceId },
-            data: { status: nextPieceStatus, version: { increment: 1 } },
+          if (!machine) {
+            throw new NotFoundException({
+              code: "MACHINE_NOT_FOUND",
+              message: "Machine introuvable.",
+            });
+          }
+          if (machine.status !== "ACTIVE") {
+            throw new ConflictException({
+              code:
+                machine.status === "MAINTENANCE" ? "MACHINE_IN_MAINTENANCE" : "MACHINE_UNAVAILABLE",
+              message: "Cette machine ne peut pas démarrer une nouvelle production.",
+            });
+          }
+          if (!assignment) {
+            throw new ConflictException({
+              code: "UNIT_NOT_ASSIGNED_TO_MACHINE",
+              message: "Cette unité n'est pas affectée à la machine sélectionnée.",
+            });
+          }
+          const assignedBarMembership = await transaction.cuttingBarItem.findFirst({
+            where: {
+              pieceUnitId: unit.id,
+              active: true,
+              cuttingBar: { is: { assignments: { some: { active: true } } } },
+            },
+            select: { id: true },
           });
-        }
-        if (offer.status === "READY") {
-          await transaction.offer.update({
-            where: { id: offer.id },
-            data: { status: "IN_PRODUCTION", version: { increment: 1 } },
+          if (assignedBarMembership) {
+            throw new ConflictException({
+              code: "BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN",
+              message:
+                "Cette pièce appartient à une barre affectée. Démarrez et terminez la barre depuis l’interface de production opérateur.",
+            });
+          }
+          if (unit.status !== "ASSIGNED") {
+            throw new ConflictException({
+              code:
+                unit.status === "IN_PROGRESS"
+                  ? "UNIT_ALREADY_IN_PRODUCTION"
+                  : "INVALID_STATE_TRANSITION",
+              message: "Cette unité ne peut pas démarrer dans son état actuel.",
+            });
+          }
+          if (unit.piece.status === "ARCHIVED" || unit.piece.status === "COMPLETED") {
+            throw new ConflictException({
+              code: "PIECE_NOT_IN_PRODUCTION",
+              message: "Cette pièce ne peut plus démarrer de production.",
+            });
+          }
+          const offer = await transaction.offer.findUnique({
+            where: { id: unit.piece.offerId },
+            select: { id: true, reference: true, status: true },
           });
-          const offerStartedEvent = await transaction.historyEvent.create({
+          if (!offer || !["READY", "IN_PRODUCTION"].includes(offer.status)) {
+            throw new ConflictException({
+              code: "OFFER_NOT_READY_FOR_PRODUCTION",
+              message: "L’offre doit disposer d’un plan validé avant de démarrer la production.",
+            });
+          }
+          if (activeOperatorOperation) {
+            throw new ConflictException({
+              code: "OPERATOR_ALREADY_IN_PRODUCTION",
+              message: "Terminez l'opération en cours avant d'en démarrer une autre.",
+            });
+          }
+
+          const startedAt = new Date();
+          const unitUpdate = await transaction.pieceUnit.updateMany({
+            where: { id: unit.id, status: "ASSIGNED", version: unit.version },
             data: {
-              eventType: "OFFER_PRODUCTION_STARTED",
-              entityType: "OFFER",
-              entityId: offer.id,
-              actorUserId: actor.user.id,
-              actorRole: actor.user.role,
-              metadata: {
-                offerId: offer.id,
-                reference: offer.reference,
-                operationId: operation.id,
-              },
+              status: "IN_PROGRESS",
+              productionStatus: "LANCEE",
+              currentOperatorId: actor.user.id,
+              startedAt,
+              version: { increment: 1 },
             },
           });
-          await deliverBusinessNotification(transaction, offerStartedEvent, { offerId: offer.id });
-        }
-        const productionStartedEvent = await transaction.historyEvent.create({
-          data: {
-            eventType: "PRODUCTION_STARTED",
-            entityType: "PRODUCTION_OPERATION",
-            entityId: operation.id,
-            actorUserId: actor.user.id,
-            actorRole: actor.user.role,
-            metadata: {
-              offerId: unit.piece.offerId,
+          if (unitUpdate.count !== 1) {
+            throw new ConflictException({
+              code: "PRODUCTION_CONCURRENT_UPDATE",
+              message: "Cette pièce vient d’être prise en charge par une autre requête.",
+            });
+          }
+          const operation = await transaction.productionOperation.create({
+            data: {
               pieceId: unit.pieceId,
               pieceUnitId: unit.id,
               machineId: machine.id,
-              oldUnitStatus: unit.status,
-              newUnitStatus: "IN_PROGRESS",
-              oldPieceStatus: unit.piece.status,
-              newPieceStatus: nextPieceStatus,
+              operatorId: actor.user.id,
+              startedAt,
             },
-          },
-        });
-        await deliverBusinessNotification(transaction, productionStartedEvent, { offerId: unit.piece.offerId, machineId: machine.id });
+            include: operationInclude,
+          });
+          const nextPieceStatus =
+            unit.piece.status === "ASSIGNED" ? "IN_PROGRESS" : unit.piece.status;
+          if (nextPieceStatus !== unit.piece.status) {
+            await transaction.piece.update({
+              where: { id: unit.pieceId },
+              data: { status: nextPieceStatus, version: { increment: 1 } },
+            });
+          }
+          if (offer.status === "READY") {
+            await transaction.offer.update({
+              where: { id: offer.id },
+              data: { status: "IN_PRODUCTION", version: { increment: 1 } },
+            });
+            const offerStartedEvent = await transaction.historyEvent.create({
+              data: {
+                eventType: "OFFER_PRODUCTION_STARTED",
+                entityType: "OFFER",
+                entityId: offer.id,
+                actorUserId: actor.user.id,
+                actorRole: actor.user.role,
+                metadata: {
+                  offerId: offer.id,
+                  reference: offer.reference,
+                  operationId: operation.id,
+                },
+              },
+            });
+            await deliverBusinessNotification(transaction, offerStartedEvent, {
+              offerId: offer.id,
+            });
+          }
+          const productionStartedEvent = await transaction.historyEvent.create({
+            data: {
+              eventType: "PRODUCTION_STARTED",
+              entityType: "PRODUCTION_OPERATION",
+              entityId: operation.id,
+              actorUserId: actor.user.id,
+              actorRole: actor.user.role,
+              metadata: {
+                offerId: unit.piece.offerId,
+                pieceId: unit.pieceId,
+                pieceUnitId: unit.id,
+                machineId: machine.id,
+                oldUnitStatus: unit.status,
+                newUnitStatus: "IN_PROGRESS",
+                oldPieceStatus: unit.piece.status,
+                newPieceStatus: nextPieceStatus,
+              },
+            },
+          });
+          await deliverBusinessNotification(transaction, productionStartedEvent, {
+            offerId: unit.piece.offerId,
+            machineId: machine.id,
+          });
 
-        return this.toManagedOperation({
-          ...operation,
-          piece: { ...operation.piece, status: nextPieceStatus },
-          pieceUnit: { ...operation.pieceUnit, status: "IN_PROGRESS" },
-        });
-      });
+          return this.toManagedOperation({
+            ...operation,
+            piece: { ...operation.piece, status: nextPieceStatus },
+            pieceUnit: { ...operation.pieceUnit, status: "IN_PROGRESS" },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
       this.realtime?.publish({
         type: "production.started",
         entityType: "PRODUCTION_OPERATION",
@@ -340,10 +359,17 @@ export class ProductionService {
       });
       return result;
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === "P2002" || error.code === "P2034")
+      ) {
         throw new ConflictException({
-          code: "OPERATION_ALREADY_ACTIVE",
-          message: "Cette unité ou cet opérateur a déjà une opération en cours.",
+          code:
+            error.code === "P2034" ? "PRODUCTION_CONCURRENT_UPDATE" : "OPERATION_ALREADY_ACTIVE",
+          message:
+            error.code === "P2034"
+              ? "La pièce ou l’affectation a changé pendant le démarrage. Actualisez puis réessayez."
+              : "Cette unité ou cet opérateur a déjà une opération en cours.",
         });
       }
       throw error;
@@ -351,157 +377,150 @@ export class ProductionService {
   }
 
   async complete(actor: AuthContext, operationId: string): Promise<ManagedProductionOperation> {
-    const result = await this.prisma.$transaction(async (transaction) => {
-      const operation = await transaction.productionOperation.findUnique({
-        where: { id: operationId },
-        include: operationInclude,
-      });
-      if (!operation) {
-        throw new NotFoundException({
-          code: "PRODUCTION_OPERATION_NOT_FOUND",
-          message: "Opération de production introuvable.",
-        });
-      }
-      if (
-        operation.operatorId !== actor.user.id &&
-        !["ADMIN", "PRODUCTION_MANAGER"].includes(actor.user.role)
-      ) {
-        throw new ForbiddenException({
-          code: "PERMISSION_DENIED",
-          message: "Vous ne pouvez pas terminer l'opération d'un autre opérateur.",
-        });
-      }
-      if (operation.status !== "IN_PROGRESS" || operation.pieceUnit.status !== "IN_PROGRESS") {
-        throw new ConflictException({
-          code: "UNIT_ALREADY_COMPLETED",
-          message: "Cette unité a déjà été terminée ou n'est plus en production.",
-        });
-      }
+    let result: ManagedProductionOperation;
+    try {
+      result = await this.prisma.$transaction(
+        async (transaction) => {
+          const operation = await transaction.productionOperation.findUnique({
+            where: { id: operationId },
+            include: operationInclude,
+          });
+          if (!operation) {
+            throw new NotFoundException({
+              code: "PRODUCTION_OPERATION_NOT_FOUND",
+              message: "Opération de production introuvable.",
+            });
+          }
+          if (
+            operation.operatorId !== actor.user.id &&
+            !["ADMIN", "PRODUCTION_MANAGER"].includes(actor.user.role)
+          ) {
+            throw new ForbiddenException({
+              code: "PERMISSION_DENIED",
+              message: "Vous ne pouvez pas terminer l'opération d'un autre opérateur.",
+            });
+          }
+          if (operation.status !== "IN_PROGRESS" || operation.pieceUnit.status !== "IN_PROGRESS") {
+            throw new ConflictException({
+              code: "UNIT_ALREADY_COMPLETED",
+              message: "Cette unité a déjà été terminée ou n'est plus en production.",
+            });
+          }
+          const assignedBarMembership = await transaction.cuttingBarItem.findFirst({
+            where: {
+              pieceUnitId: operation.pieceUnitId,
+              active: true,
+              cuttingBar: { is: { assignments: { some: { active: true } } } },
+            },
+            select: { id: true },
+          });
+          if (assignedBarMembership) {
+            throw new ConflictException({
+              code: "BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN",
+              message:
+                "Cette pièce appartient à une barre affectée. Terminez la barre depuis l’interface de production opérateur.",
+            });
+          }
 
-      const completedAt = new Date();
-      const remainingUnits = await transaction.pieceUnit.count({
-        where: {
-          pieceId: operation.pieceId,
-          status: { notIn: ["QUALITY_PENDING", "COMPLETED", "ACCEPTED", "REJECTED", "SCRAPPED"] },
-        },
-      });
-      const nextPieceStatus = remainingUnits === 1 ? "COMPLETED" : operation.piece.status;
-      const operationUpdate = await transaction.productionOperation.updateMany({
-        where: { id: operation.id, status: "IN_PROGRESS", version: operation.version },
-        data: { status: "COMPLETED", completedAt, version: { increment: 1 } },
-      });
-      if (operationUpdate.count !== 1) {
-        throw new ConflictException({
-          code: "PRODUCTION_CONCURRENT_UPDATE",
-          message: "Cette opération a été modifiée par une autre requête.",
-        });
-      }
-      const unitUpdate = await transaction.pieceUnit.updateMany({
-        where: {
-          id: operation.pieceUnitId,
-          status: "IN_PROGRESS",
-          version: operation.pieceUnit.version,
-        },
-        data: {
-          status: "QUALITY_PENDING",
-          productionStatus: "FABRIQUEE",
-          currentOperatorId: null,
-          manufacturedAt: completedAt,
-          version: { increment: 1 },
-        },
-      });
-      if (unitUpdate.count !== 1) {
-        throw new ConflictException({
-          code: "PRODUCTION_CONCURRENT_UPDATE",
-          message: "Cette unité a été modifiée par une autre requête.",
-        });
-      }
-      const barItem = await transaction.cuttingBarItem.findFirst({
-        where: { pieceUnitId: operation.pieceUnitId, active: true },
-        include: { cuttingBar: true },
-      });
-      if (barItem && barItem.cuttingBar.status === "LANCEE") {
-        const unitsRemaining = await transaction.cuttingBarItem.count({
-          where: {
-            cuttingBarId: barItem.cuttingBarId,
-            active: true,
-            pieceUnit: {
+          const completedAt = new Date();
+          const remainingUnits = await transaction.pieceUnit.count({
+            where: {
+              pieceId: operation.pieceId,
               status: {
-                notIn: ["COMPLETED", "QUALITY_PENDING", "ACCEPTED", "REJECTED", "SCRAPPED"],
+                notIn: ["QUALITY_PENDING", "COMPLETED", "ACCEPTED", "REJECTED", "SCRAPPED"],
               },
             },
-          },
-        });
-        if (unitsRemaining === 0) {
-          const barTransition = await transaction.cuttingBar.updateMany({
-            where: { id: barItem.cuttingBarId, status: "LANCEE" },
-            data: { status: "FABRIQUEE", fabricatedAt: completedAt },
           });
-          if (barTransition.count === 1) {
-            const barCompletedEvent = await transaction.historyEvent.create({
-              data: {
-                eventType: "BAR_PRODUCTION_COMPLETED",
-                entityType: "CUTTING_BAR",
-                entityId: barItem.cuttingBarId,
-                actorUserId: actor.user.id,
-                actorRole: actor.user.role,
-                metadata: {
-                  offerId: operation.piece.offerId,
-                  previousStatus: "LANCEE",
-                  newStatus: "FABRIQUEE",
-                  completedAt: completedAt.toISOString(),
-                },
-              },
+          const nextPieceStatus = remainingUnits === 1 ? "COMPLETED" : operation.piece.status;
+          const operationUpdate = await transaction.productionOperation.updateMany({
+            where: { id: operation.id, status: "IN_PROGRESS", version: operation.version },
+            data: { status: "COMPLETED", completedAt, version: { increment: 1 } },
+          });
+          if (operationUpdate.count !== 1) {
+            throw new ConflictException({
+              code: "PRODUCTION_CONCURRENT_UPDATE",
+              message: "Cette opération a été modifiée par une autre requête.",
             });
-            await deliverBusinessNotification(transaction, barCompletedEvent, { offerId: operation.piece.offerId, machineId: operation.machineId });
           }
-        }
-      }
-      if (nextPieceStatus !== operation.piece.status) {
-        await transaction.piece.update({
-          where: { id: operation.pieceId },
-          data: { status: nextPieceStatus, version: { increment: 1 } },
-        });
-      }
-      const productionCompletedEvent = await transaction.historyEvent.create({
-        data: {
-          eventType: "PRODUCTION_COMPLETED",
-          entityType: "PRODUCTION_OPERATION",
-          entityId: operation.id,
-          actorUserId: actor.user.id,
-          actorRole: actor.user.role,
-          metadata: {
+          const unitUpdate = await transaction.pieceUnit.updateMany({
+            where: {
+              id: operation.pieceUnitId,
+              status: "IN_PROGRESS",
+              version: operation.pieceUnit.version,
+            },
+            data: {
+              status: "QUALITY_PENDING",
+              productionStatus: "FABRIQUEE",
+              currentOperatorId: null,
+              manufacturedAt: completedAt,
+              version: { increment: 1 },
+            },
+          });
+          if (unitUpdate.count !== 1) {
+            throw new ConflictException({
+              code: "PRODUCTION_CONCURRENT_UPDATE",
+              message: "Cette unité a été modifiée par une autre requête.",
+            });
+          }
+          if (nextPieceStatus !== operation.piece.status) {
+            await transaction.piece.update({
+              where: { id: operation.pieceId },
+              data: { status: nextPieceStatus, version: { increment: 1 } },
+            });
+          }
+          const productionCompletedEvent = await transaction.historyEvent.create({
+            data: {
+              eventType: "PRODUCTION_COMPLETED",
+              entityType: "PRODUCTION_OPERATION",
+              entityId: operation.id,
+              actorUserId: actor.user.id,
+              actorRole: actor.user.role,
+              metadata: {
+                offerId: operation.piece.offerId,
+                pieceId: operation.pieceId,
+                pieceUnitId: operation.pieceUnitId,
+                machineId: operation.machineId,
+                operatorId: operation.operatorId,
+                oldUnitStatus: operation.pieceUnit.status,
+                newUnitStatus: "QUALITY_PENDING",
+                oldPieceStatus: operation.piece.status,
+                newPieceStatus: nextPieceStatus,
+              },
+            },
+          });
+          await deliverBusinessNotification(transaction, productionCompletedEvent, {
             offerId: operation.piece.offerId,
-            pieceId: operation.pieceId,
-            pieceUnitId: operation.pieceUnitId,
             machineId: operation.machineId,
-            operatorId: operation.operatorId,
-            oldUnitStatus: operation.pieceUnit.status,
-            newUnitStatus: "QUALITY_PENDING",
-            oldPieceStatus: operation.piece.status,
-            newPieceStatus: nextPieceStatus,
-          },
-        },
-      });
-      await deliverBusinessNotification(transaction, productionCompletedEvent, { offerId: operation.piece.offerId, machineId: operation.machineId });
+          });
 
-      const completed = await transaction.productionOperation.findUnique({
-        where: { id: operation.id },
-        include: operationInclude,
-      });
-      if (!completed) {
+          const completed = await transaction.productionOperation.findUnique({
+            where: { id: operation.id },
+            include: operationInclude,
+          });
+          if (!completed) {
+            throw new ConflictException({
+              code: "PRODUCTION_OPERATION_NOT_FOUND",
+              message: "L'opération terminée est introuvable.",
+            });
+          }
+
+          return this.toManagedOperation({
+            ...completed,
+            piece: { ...completed.piece, status: nextPieceStatus },
+            pieceUnit: { ...completed.pieceUnit, status: "QUALITY_PENDING" },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
         throw new ConflictException({
-          code: "PRODUCTION_OPERATION_NOT_FOUND",
-          message: "L'opération terminée est introuvable.",
+          code: "PRODUCTION_CONCURRENT_UPDATE",
+          message: "La pièce ou son affectation a changé. Actualisez puis réessayez.",
         });
       }
-
-      return this.toManagedOperation({
-        ...completed,
-        piece: { ...completed.piece, status: nextPieceStatus },
-        pieceUnit: { ...completed.pieceUnit, status: "QUALITY_PENDING" },
-      });
-    });
+      throw error;
+    }
     this.realtime?.publish({
       type: "production.completed",
       entityType: "PRODUCTION_OPERATION",
@@ -515,7 +534,8 @@ export class ProductionService {
     if (actor.user.role !== "ADMIN") {
       throw new ForbiddenException({
         code: "ADMIN_REQUIRED",
-        message: "Seul un administrateur peut terminer une session depuis la gestion des utilisateurs.",
+        message:
+          "Seul un administrateur peut terminer une session depuis la gestion des utilisateurs.",
       });
     }
 

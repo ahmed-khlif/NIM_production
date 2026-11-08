@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaService } from "../src/infrastructure/prisma/prisma.service";
 import { ProductionService } from "../src/production/production.service";
@@ -96,6 +97,53 @@ function createService(prisma: Partial<PrismaService>): ProductionService {
 }
 
 describe("ProductionService", () => {
+  it("keeps active bar work out of the legacy current operation and unit queue", async () => {
+    const prisma = {
+      offer: { findUnique: vi.fn() },
+      productionOperation: { findFirst: vi.fn().mockResolvedValue(null) },
+      assignment: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const service = createService(prisma as never);
+
+    await expect(service.getCurrent(actor, { machineId: machine.id })).resolves.toEqual({
+      current: null,
+      queue: [],
+    });
+    expect(prisma.productionOperation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          NOT: {
+            pieceUnit: {
+              barMemberships: {
+                some: {
+                  active: true,
+                  cuttingBar: { is: { assignments: { some: { active: true } } } },
+                },
+              },
+            },
+          },
+        }),
+      }),
+    );
+    expect(prisma.assignment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          barAssignmentId: null,
+          pieceUnit: expect.objectContaining({
+            NOT: {
+              barMemberships: {
+                some: {
+                  active: true,
+                  cuttingBar: { is: { assignments: { some: { active: true } } } },
+                },
+              },
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
   it("lets an admin end an idle machine session, preserving history and notifying the team", async () => {
     const event = {
       id: "event-1",
@@ -247,7 +295,10 @@ describe("ProductionService", () => {
   it("starts an assigned unit and records the production event transactionally", async () => {
     const started = operation();
     const transaction = {
-      pieceUnit: { findUnique: vi.fn().mockResolvedValue(assignedUnit), update: vi.fn() },
+      pieceUnit: {
+        findUnique: vi.fn().mockResolvedValue(assignedUnit),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
       machine: { findUnique: vi.fn().mockResolvedValue(machine) },
       assignment: { findFirst: vi.fn().mockResolvedValue(assignment) },
       offer: {
@@ -278,8 +329,9 @@ describe("ProductionService", () => {
       unitStatus: "IN_PROGRESS",
       pieceStatus: "IN_PROGRESS",
     });
-    expect(transaction.pieceUnit.update).toHaveBeenCalledWith(
+    expect(transaction.pieceUnit.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: { id: assignedUnit.id, status: "ASSIGNED", version: assignedUnit.version },
         data: expect.objectContaining({ status: "IN_PROGRESS", currentOperatorId: actor.user.id }),
       }),
     );
@@ -306,6 +358,66 @@ describe("ProductionService", () => {
         }),
       }),
     );
+  });
+
+  it("prevents legacy start on a PieceUnit attached to an active bar assignment", async () => {
+    const transaction = {
+      pieceUnit: {
+        findUnique: vi.fn().mockResolvedValue(assignedUnit),
+        updateMany: vi.fn(),
+      },
+      machine: { findUnique: vi.fn().mockResolvedValue(machine) },
+      assignment: { findFirst: vi.fn().mockResolvedValue(assignment) },
+      productionOperation: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn() },
+      cuttingBarItem: { findFirst: vi.fn().mockResolvedValue({ id: "bar-item-1" }) },
+    };
+    const realtime = { publish: vi.fn() };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+      ),
+    };
+    const service = new ProductionService(prisma as never, realtime as never);
+
+    await expect(
+      service.start(actor, { pieceUnitId: assignedUnit.id, machineId: machine.id }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: "BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN" }),
+    });
+    expect(transaction.cuttingBarItem.findFirst).toHaveBeenCalledWith({
+      where: {
+        pieceUnitId: assignedUnit.id,
+        active: true,
+        cuttingBar: { is: { assignments: { some: { active: true } } } },
+      },
+      select: { id: true },
+    });
+    expect(transaction.pieceUnit.updateMany).not.toHaveBeenCalled();
+    expect(transaction.productionOperation.create).not.toHaveBeenCalled();
+    expect(realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it("surfaces serializable start races as a conflict and emits no realtime event", async () => {
+    const serializationConflict = new Prisma.PrismaClientKnownRequestError(
+      "Concurrent transaction conflict",
+      { code: "P2034", clientVersion: "test" },
+    );
+    const prisma = {
+      $transaction: vi.fn().mockRejectedValue(serializationConflict),
+    };
+    const realtime = { publish: vi.fn() };
+    const service = new ProductionService(prisma as never, realtime as never);
+
+    await expect(
+      service.start(actor, { pieceUnitId: assignedUnit.id, machineId: machine.id }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: "PRODUCTION_CONCURRENT_UPDATE" }),
+    });
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    expect(realtime.publish).not.toHaveBeenCalled();
   });
 
   it("completes a unit into quality pending and records the completion", async () => {
@@ -352,48 +464,33 @@ describe("ProductionService", () => {
     );
   });
 
-  it("marks a bar fabricated when its last active unit completes and records the timestamp", async () => {
+  it("does not let the legacy completion endpoint finish a unit on an active assigned bar", async () => {
     const active = operation();
-    const completed = operation("COMPLETED");
     const transaction = {
       productionOperation: {
-        findUnique: vi.fn().mockResolvedValueOnce(active).mockResolvedValueOnce(completed),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        findUnique: vi.fn().mockResolvedValue(active),
+        updateMany: vi.fn(),
       },
-      pieceUnit: {
-        count: vi.fn().mockResolvedValue(1),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      cuttingBarItem: {
-        findFirst: vi
-          .fn()
-          .mockResolvedValue({ cuttingBarId: "bar-1", cuttingBar: { status: "LANCEE" } }),
-        count: vi.fn().mockResolvedValue(0),
-      },
-      cuttingBar: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      cuttingBarItem: { findFirst: vi.fn().mockResolvedValue({ id: "bar-item-1" }) },
+      pieceUnit: { count: vi.fn(), updateMany: vi.fn() },
       piece: { update: vi.fn() },
       historyEvent: { create: vi.fn() },
     };
+    const realtime = { publish: vi.fn() };
     const prisma = {
       $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) =>
         callback(transaction),
       ),
     };
-    const service = createService(prisma as never);
+    const service = new ProductionService(prisma as never, realtime as never);
 
-    await service.complete(actor, active.id);
-
-    expect(transaction.cuttingBar.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: "bar-1", status: "LANCEE" },
-        data: { status: "FABRIQUEE", fabricatedAt: expect.any(Date) },
-      }),
-    );
-    expect(transaction.historyEvent.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ eventType: "BAR_PRODUCTION_COMPLETED", entityId: "bar-1" }),
-      }),
-    );
+    await expect(service.complete(actor, active.id)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: "BAR_PRODUCTION_REQUIRES_PRODUCTION_RUN" }),
+    });
+    expect(transaction.productionOperation.updateMany).not.toHaveBeenCalled();
+    expect(transaction.pieceUnit.updateMany).not.toHaveBeenCalled();
+    expect(transaction.historyEvent.create).not.toHaveBeenCalled();
+    expect(realtime.publish).not.toHaveBeenCalled();
   });
 
   it("rejects duplicate completion", async () => {
@@ -419,6 +516,7 @@ describe("ProductionService", () => {
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
       pieceUnit: { count: vi.fn(), updateMany: vi.fn() },
+      cuttingBarItem: { findFirst: vi.fn().mockResolvedValue(null) },
       piece: { update: vi.fn() },
       historyEvent: { create: vi.fn() },
     };

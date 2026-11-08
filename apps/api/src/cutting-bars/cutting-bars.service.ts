@@ -764,6 +764,7 @@ export class CuttingBarsService {
   async unassignBar(actor: AuthContext, offerId: string, barId: string) {
     const result = await this.prisma.$transaction(
       async (transaction) => {
+        await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "CuttingBar" WHERE "id" = ${barId} FOR UPDATE`);
         const bar = await transaction.cuttingBar.findFirst({
           where: { id: barId, offerId },
           include: barInclude,
@@ -785,6 +786,15 @@ export class CuttingBarsService {
           throw new ConflictException({
             code: "PRODUCTION_ALREADY_STARTED",
             message: "Impossible de retirer cette barre : la fabrication a déjà été lancée.",
+          });
+        const activeSchedule = await transaction.scheduleEvent.findFirst({
+          where: { cuttingBarId: bar.id, type: "PRODUCTION", status: "PLANNED" },
+          select: { id: true },
+        });
+        if (activeSchedule)
+          throw new ConflictException({
+            code: "BAR_HAS_ACTIVE_SCHEDULE",
+            message: "Annulez d’abord le créneau de production dans Planning avant de retirer cette barre de la machine.",
           });
         const unitIds = bar.items.filter((item) => item.active).map((item) => item.pieceUnitId);
         if (bar.items.some((item) => item.active && item.pieceUnit.status !== "ASSIGNED"))

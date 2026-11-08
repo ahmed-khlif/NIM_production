@@ -59,6 +59,7 @@ export class MachinesController {
     queue: MachineDetail["queue"];
     pagination: MachineDetail["queuePagination"];
     activeOperationCount: number;
+    activeProductionRunCount: number;
   }> {
     const detail = await this.machinesService.getMachine(id, {
       page: page === undefined ? 1 : Number(page),
@@ -70,6 +71,7 @@ export class MachinesController {
       queue: detail.queue,
       pagination: detail.queuePagination,
       activeOperationCount: detail.activeOperationCount,
+      activeProductionRunCount: detail.activeProductionRunCount,
     };
   }
 

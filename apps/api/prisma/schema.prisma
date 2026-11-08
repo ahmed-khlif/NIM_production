@@ -109,6 +109,17 @@ enum ProductionRunStatus {
   CANCELLED
 }
 
+enum ScheduleEventType {
+  PRODUCTION
+  MAINTENANCE
+  MACHINE_BLOCK
+}
+
+enum ScheduleEventStatus {
+  PLANNED
+  CANCELLED
+}
+
 enum NonConformityReason {
   DIMENSION
   CUTTING_ERROR
@@ -200,6 +211,10 @@ model User {
   settings                     UserSettings?
   resolvedNonConformities      NonConformity[]          @relation("NonConformityResolver")
   createdClients               Client[]                 @relation("ClientCreator")
+  createdScheduleEvents        ScheduleEvent[]           @relation("ScheduleEventCreator")
+  updatedScheduleEvents        ScheduleEvent[]           @relation("ScheduleEventUpdater")
+  cancelledScheduleEvents      ScheduleEvent[]           @relation("ScheduleEventCanceller")
+  scheduleEventOperators       ScheduleEventOperator[]
 
   @@index([role, isActive])
 }
@@ -244,6 +259,7 @@ model Machine {
   machineSessions      MachineSession[]
   productionRuns       ProductionRun[]
   nonConformities      NonConformity[]
+  scheduleEvents       ScheduleEvent[]
 
   @@index([status, updatedAt])
   @@index([type])
@@ -476,6 +492,7 @@ model CuttingBar {
   assignments     MachineBarAssignment[]
   productionRuns  ProductionRun[]
   nonConformities NonConformity[]
+  scheduleEvents  ScheduleEvent[]
 
   @@unique([offerId, reference])
   @@index([offerId, status, profile])
@@ -549,6 +566,50 @@ model MachineBarAssignment {
   @@index([machineId, active, assignedAt])
   @@index([assignedById, assignedAt])
   @@index([cuttingBarId, assignedAt])
+}
+
+model ScheduleEvent {
+  id              String             @id @default(cuid())
+  type            ScheduleEventType
+  status          ScheduleEventStatus @default(PLANNED)
+  title           String
+  notes           String?
+  startAt         DateTime           @db.Timestamptz(3)
+  endAt           DateTime           @db.Timestamptz(3)
+  machineId       String
+  cuttingBarId    String?
+  createdById     String
+  updatedById     String?
+  cancelledById   String?
+  cancelledAt     DateTime?          @db.Timestamptz(3)
+  createdAt       DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime           @updatedAt @db.Timestamptz(3)
+  machine         Machine            @relation(fields: [machineId], references: [id], onDelete: Restrict)
+  cuttingBar      CuttingBar?        @relation(fields: [cuttingBarId], references: [id], onDelete: Restrict)
+  createdBy       User               @relation("ScheduleEventCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy       User?              @relation("ScheduleEventUpdater", fields: [updatedById], references: [id], onDelete: Restrict)
+  cancelledBy     User?              @relation("ScheduleEventCanceller", fields: [cancelledById], references: [id], onDelete: Restrict)
+  operators       ScheduleEventOperator[]
+
+  @@index([machineId, status, startAt, endAt])
+  @@index([cuttingBarId, status])
+  @@index([type, status, startAt])
+  @@index([createdById, createdAt])
+}
+
+model ScheduleEventOperator {
+  id              String                     @id @default(cuid())
+  scheduleEventId String
+  operatorId      String
+  role            MachineSessionOperatorRole
+  active          Boolean                    @default(true)
+  joinedAt        DateTime                   @default(now()) @db.Timestamptz(3)
+  removedAt       DateTime?                  @db.Timestamptz(3)
+  scheduleEvent   ScheduleEvent              @relation(fields: [scheduleEventId], references: [id], onDelete: Restrict)
+  operator        User                       @relation(fields: [operatorId], references: [id], onDelete: Restrict)
+
+  @@index([scheduleEventId, active, role])
+  @@index([operatorId, active])
 }
 
 model MachineSession {

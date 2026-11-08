@@ -382,6 +382,7 @@ describe("CuttingBarsService", () => {
 
   it("cannot remove a machine assignment after production starts", async () => {
     const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       cuttingBar: { findFirst: vi.fn().mockResolvedValue(bar("LANCEE")), update: vi.fn() },
       machineBarAssignment: {
         findFirst: vi.fn().mockResolvedValue({ id: "assignment-1", machineId: "machine-1" }),
@@ -413,7 +414,9 @@ describe("CuttingBarsService", () => {
     };
     const shapedBar = bar();
     const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       cuttingBar: { findFirst: vi.fn().mockResolvedValue(assignedBar), update: vi.fn() },
+      scheduleEvent: { findFirst: vi.fn().mockResolvedValue(null) },
       machineBarAssignment: {
         findFirst: vi.fn().mockResolvedValue({ id: "bar-assignment-1", machineId: "machine-1" }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -459,6 +462,38 @@ describe("CuttingBarsService", () => {
         data: expect.objectContaining({ eventType: "BAR_UNASSIGNED_FROM_MACHINE" }),
       }),
     );
+  });
+
+  it("requires cancelling a production schedule before removing its active machine assignment", async () => {
+    const assignedBar = {
+      ...bar("AFFECTEE"),
+      items: bar().items.map((item) => ({
+        ...item,
+        pieceUnit: { ...item.pieceUnit, status: "ASSIGNED" },
+      })),
+    };
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      cuttingBar: { findFirst: vi.fn().mockResolvedValue(assignedBar), update: vi.fn() },
+      machineBarAssignment: {
+        findFirst: vi.fn().mockResolvedValue({ id: "bar-assignment-1", machineId: "machine-1" }),
+        updateMany: vi.fn(),
+      },
+      scheduleEvent: { findFirst: vi.fn().mockResolvedValue({ id: "schedule-1" }) },
+      assignment: { updateMany: vi.fn() },
+      pieceUnit: { updateMany: vi.fn() },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+    };
+    const service = createService(prisma as never);
+
+    await expect(service.unassignBar(actor, "offer-1", "bar-1")).rejects.toMatchObject({
+      response: { code: "BAR_HAS_ACTIVE_SCHEDULE" },
+    });
+    expect(transaction.$queryRaw).toHaveBeenCalled();
+    expect(transaction.machineBarAssignment.updateMany).not.toHaveBeenCalled();
+    expect(transaction.pieceUnit.updateMany).not.toHaveBeenCalled();
   });
 
   it("cancels only an unassigned shaped bar and releases its unit without deleting history", async () => {

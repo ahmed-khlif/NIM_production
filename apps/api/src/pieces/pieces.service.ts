@@ -1278,10 +1278,11 @@ export class PiecesService {
     }
     const selectedProfiles = [...selectedByKey.values()];
     const selectedKeys = new Set(selectedByKey.keys());
-    const acceptedPieceProfiles = catalogProfiles
-      .filter((item) => selectedKeys.has(materialProfileKey(item.profile)))
-      .flatMap((item) => [item.profile, ...item.aliases]);
-    const profileNames = [...new Set([...selectedProfiles, ...acceptedPieceProfiles])];
+    // Match in memory with the same normalized key as the picker. A Prisma
+    // `profile IN (...)` filter ignores whitespace normalization, so legacy
+    // rows such as "IPE360" were silently omitted when "IPE 360" was chosen.
+    // Only eligible piece-unit fields for this affaire are loaded; historical
+    // piece values remain untouched.
     const units = await this.prisma.pieceUnit.findMany({
       where: {
         status: "PENDING",
@@ -1290,7 +1291,6 @@ export class PiecesService {
         piece: {
           offerId,
           status: { not: "ARCHIVED" },
-          profile: { in: profileNames, mode: "insensitive" },
         },
       },
       select: { pieceId: true, piece: { select: { profile: true, lengthMm: true } } },

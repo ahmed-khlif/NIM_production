@@ -258,7 +258,9 @@ describe("OffersService", () => {
         count: vi.fn().mockResolvedValue(1),
       },
       assignment: { count: vi.fn().mockResolvedValue(1) },
+      machineBarAssignment: { count: vi.fn().mockResolvedValue(2) },
       productionOperation: { count: vi.fn().mockResolvedValue(0) },
+      productionRun: { count: vi.fn().mockResolvedValue(1) },
     };
 
     const result = await serviceWith(prisma as never).getProductionSummary("offer-a", { search: "IPE", status: "ASSIGNED" });
@@ -270,6 +272,9 @@ describe("OffersService", () => {
       resolvedUnits: 2,
       pendingQuality: 1,
       activeAssignments: 1,
+      activeBarAssignments: 2,
+      activeProductionRuns: 1,
+      activeOperations: 0,
       productionRate: 100,
     });
     expect(result.pieces[0]).toMatchObject({
@@ -309,12 +314,20 @@ describe("OffersService", () => {
       piece: { count: vi.fn().mockResolvedValue(1) },
       pieceUnit: { count: vi.fn().mockResolvedValue(1) },
       productionOperation: { count: vi.fn().mockResolvedValue(0) },
+      productionRun: { count: vi.fn().mockResolvedValue(0) },
     };
     const service = serviceWith(prisma as never);
 
     await expect(service.update(actor, "offer-a", { status: "COMPLETED" })).rejects.toBeInstanceOf(
       BadRequestException,
     );
+    expect(prisma.productionOperation.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        piece: { offerId: "offer-a" },
+        status: "IN_PROGRESS",
+        NOT: expect.objectContaining({ pieceUnit: expect.any(Object) }),
+      }),
+    });
   });
 
   it("blocks archiving an offer while production is active", async () => {

@@ -509,6 +509,133 @@ export const unassignAssignmentSchema = z.object({
     .max(240, "Le motif est trop long."),
 });
 
+const scheduleDateTimeSchema = z.string().datetime({ offset: true });
+const scheduleOperatorIdsSchema = z.array(z.string().trim().min(1).max(64)).max(50).refine(
+  (ids) => new Set(ids).size === ids.length,
+  "Un opérateur ne peut apparaître qu'une seule fois dans l'équipe.",
+);
+
+export const scheduleEventTypeSchema = z.enum(["PRODUCTION", "MAINTENANCE", "MACHINE_BLOCK"]);
+export const scheduleEventStatusSchema = z.enum(["PLANNED", "CANCELLED"]);
+
+export const scheduleBoardQuerySchema = z.object({
+  startAt: scheduleDateTimeSchema,
+  endAt: scheduleDateTimeSchema,
+  offerId: z.string().trim().min(1).max(64).optional(),
+  machineId: z.string().trim().min(1).max(64).optional(),
+  operatorId: z.string().trim().min(1).max(64).optional(),
+  status: z.enum(["ALL", "PLANNED", "CANCELLED"]).default("PLANNED"),
+  search: z.string().trim().max(80).default(""),
+  unscheduledPage: z.coerce.number().int().min(1).max(100_000).default(1),
+  pageSize: z.coerce.number().int().min(10).max(100).default(20),
+}).superRefine((query, context) => {
+  const start = Date.parse(query.startAt);
+  const end = Date.parse(query.endAt);
+  if (end <= start) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endAt"], message: "La fin doit être après le début." });
+  }
+  if (end - start > 32 * 24 * 60 * 60 * 1000) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endAt"], message: "La période affichée ne peut pas dépasser 32 jours." });
+  }
+});
+
+export const scheduleOfferDayQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "La date doit être au format AAAA-MM-JJ.").refine((value) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "La date indiquée est invalide."),
+});
+
+export const scheduleFirstEventDateQuerySchema = z.object({
+  offerId: z.string().trim().min(1).max(64).optional(),
+  machineId: z.string().trim().min(1).max(64).optional(),
+});
+
+const scheduleEventFields = {
+  type: scheduleEventTypeSchema,
+  title: z.string().trim().max(120).optional(),
+  notes: z.string().trim().max(1500).optional(),
+  startAt: scheduleDateTimeSchema,
+  endAt: scheduleDateTimeSchema,
+  machineId: z.string().trim().min(1).max(64),
+  cuttingBarId: z.string().trim().min(1).max(64).optional(),
+  leadOperatorId: z.string().trim().min(1).max(64).optional(),
+  helperOperatorIds: scheduleOperatorIdsSchema.default([]),
+};
+
+export const createScheduleEventSchema = z.object(scheduleEventFields).superRefine((input, context) => {
+  const start = Date.parse(input.startAt);
+  const end = Date.parse(input.endAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endAt"], message: "La fin doit être après le début." });
+  }
+  if (input.type === "PRODUCTION") {
+    if (!input.cuttingBarId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["cuttingBarId"], message: "Choisissez une barre affectée." });
+    if (!input.leadOperatorId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["leadOperatorId"], message: "Choisissez un opérateur responsable." });
+    if (input.leadOperatorId && input.helperOperatorIds.includes(input.leadOperatorId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["helperOperatorIds"], message: "Le responsable ne peut pas être aussi assistant." });
+    }
+  } else {
+    if (input.cuttingBarId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["cuttingBarId"], message: "Une interruption machine ne peut pas cibler une barre." });
+    if (!input.title?.trim()) context.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Le motif de l'événement est requis." });
+    if (input.leadOperatorId || input.helperOperatorIds.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["leadOperatorId"], message: "Les opérateurs sont réservés aux événements de production." });
+    }
+  }
+});
+
+const scheduleBatchFields = {
+  offerId: z.string().trim().min(1).max(64),
+  startAt: scheduleDateTimeSchema,
+  durationMinutes: z.number().int().min(5).max(1440),
+  gapMinutes: z.number().int().min(0).max(240).default(0),
+  leadOperatorId: z.string().trim().min(1).max(64),
+  helperOperatorIds: scheduleOperatorIdsSchema.default([]),
+};
+
+export const scheduleBatchPreviewSchema = z.object({
+  ...scheduleBatchFields,
+  cuttingBarIds: z.array(z.string().trim().min(1).max(64)).max(500).optional(),
+}).superRefine((input, context) => {
+  if (input.cuttingBarIds && new Set(input.cuttingBarIds).size !== input.cuttingBarIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["cuttingBarIds"], message: "Une barre ne peut apparaître qu'une fois." });
+  }
+  if (input.leadOperatorId && input.helperOperatorIds.includes(input.leadOperatorId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["helperOperatorIds"], message: "Le responsable ne peut pas être aussi assistant." });
+  }
+});
+
+export const createScheduleBatchSchema = z.object({
+  ...scheduleBatchFields,
+  cuttingBarIds: z.array(z.string().trim().min(1).max(64)).min(1).max(500),
+}).superRefine((input, context) => {
+  if (new Set(input.cuttingBarIds).size !== input.cuttingBarIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["cuttingBarIds"], message: "Une barre ne peut apparaître qu'une fois." });
+  }
+  if (input.helperOperatorIds.includes(input.leadOperatorId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["helperOperatorIds"], message: "Le responsable ne peut pas être aussi assistant." });
+  }
+});
+
+export const updateScheduleEventSchema = z.object({
+  title: z.string().trim().min(1).max(120).optional(),
+  notes: z.string().trim().max(1500).optional(),
+  startAt: scheduleDateTimeSchema.optional(),
+  endAt: scheduleDateTimeSchema.optional(),
+  leadOperatorId: z.string().trim().min(1).max(64).optional(),
+  helperOperatorIds: scheduleOperatorIdsSchema.optional(),
+}).superRefine((input, context) => {
+  if (input.startAt && input.endAt && Date.parse(input.endAt) <= Date.parse(input.startAt)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endAt"], message: "La fin doit être après le début." });
+  }
+  if (input.leadOperatorId && input.helperOperatorIds?.includes(input.leadOperatorId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["helperOperatorIds"], message: "Le responsable ne peut pas être aussi assistant." });
+  }
+  if (input.leadOperatorId === undefined && input.helperOperatorIds !== undefined && input.helperOperatorIds.length > 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["leadOperatorId"], message: "Un responsable est nécessaire pour modifier l'équipe." });
+  }
+});
+
 export const environmentSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -581,6 +708,11 @@ export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 export type CreateAssignmentInput = z.infer<typeof createAssignmentSchema>;
 export type ReassignAssignmentInput = z.infer<typeof reassignAssignmentSchema>;
 export type UnassignAssignmentInput = z.infer<typeof unassignAssignmentSchema>;
+export type ScheduleBoardQuery = z.infer<typeof scheduleBoardQuerySchema>;
+export type CreateScheduleEventInput = z.infer<typeof createScheduleEventSchema>;
+export type ScheduleBatchPreviewInput = z.infer<typeof scheduleBatchPreviewSchema>;
+export type CreateScheduleBatchInput = z.infer<typeof createScheduleBatchSchema>;
+export type UpdateScheduleEventInput = z.infer<typeof updateScheduleEventSchema>;
 export type ProductionCurrentQuery = z.infer<typeof productionCurrentQuerySchema>;
 export type StartProductionInput = z.infer<typeof startProductionSchema>;
 export type OperatorLoginInput = z.infer<typeof operatorLoginSchema>;

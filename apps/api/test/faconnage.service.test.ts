@@ -24,7 +24,7 @@ function serviceWith(
 }
 
 describe("FaconnageService partial plan validation", () => {
-  it("keeps the optimization plan and audit event atomic with a workload-appropriate timeout", async () => {
+  it("persists an atomic plan and matches catalogue profiles to legacy names with different whitespace", async () => {
     const now = new Date("2026-10-17T10:00:00.000Z");
     const offer = {
       id: "offer-a",
@@ -89,13 +89,21 @@ describe("FaconnageService partial plan validation", () => {
         },
       }),
     };
+    const eligibleUnits = [{ id: "unit-1", piece: { profile: "IPE 200", lengthMm: 3200 } }];
     const prisma = {
       offer: { findUnique: vi.fn().mockResolvedValue(offer) },
-      materialProfile: { findMany: vi.fn().mockResolvedValue([]) },
+      materialProfile: { findMany: vi.fn().mockResolvedValue([{ profile: "IPE200", aliases: [] }]) },
       pieceUnit: {
         findMany: vi
           .fn()
-          .mockResolvedValue([{ id: "unit-1", piece: { profile: "IPE200", lengthMm: 3200 } }]),
+          .mockImplementation((args: { where: { piece: { profile?: { in?: string[] } } } }) => {
+            const exactProfileNames = args.where.piece.profile?.in;
+            return Promise.resolve(exactProfileNames
+              ? eligibleUnits.filter((unit) => exactProfileNames.some(
+                  (name) => name.toLocaleLowerCase() === unit.piece.profile.toLocaleLowerCase(),
+                ))
+              : eligibleUnits);
+          }),
       },
       $transaction,
     };
@@ -116,9 +124,23 @@ describe("FaconnageService partial plan validation", () => {
       reference: expect.stringContaining("OFF-A"),
     });
     expect(transaction.cuttingPlan.create).toHaveBeenCalledTimes(1);
+    expect(transaction.cuttingPlan.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        proposals: {
+          create: [expect.objectContaining({
+            items: { create: [expect.objectContaining({ pieceUnitId: "unit-1" })] },
+          })],
+        },
+      }),
+    }));
     expect(optimizer.optimize).toHaveBeenCalledWith(expect.objectContaining({
       profile: "IPE200",
       rawLengths: [{ lengthMm: 6000, quantity: 4 }],
+    }));
+    expect(prisma.pieceUnit.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        piece: { offerId: offer.id, status: { not: "ARCHIVED" } },
+      }),
     }));
     expect(transaction.historyEvent.create).toHaveBeenCalledTimes(1);
     expect($transaction).toHaveBeenCalledTimes(1);

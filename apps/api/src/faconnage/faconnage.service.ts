@@ -663,19 +663,30 @@ export class FaconnageService {
       select: { profile: true, aliases: true },
     });
     const catalogueKeyByName = new Map<string, string>();
+    const catalogueNameByKey = new Map<string, string>();
     for (const item of materialProfiles) {
       const canonicalKey = profileKey(item.profile);
+      catalogueNameByKey.set(canonicalKey, item.profile);
       for (const name of [item.profile, ...item.aliases]) {
         catalogueKeyByName.set(profileKey(name), canonicalKey);
       }
     }
-    const selectedProfileKeys = new Set(profiles.map((item) => profileKey(item.profile)));
-    const acceptedCatalogueProfiles = materialProfiles
-      .filter((item) => selectedProfileKeys.has(profileKey(item.profile)))
-      .flatMap((item) => [item.profile, ...item.aliases]);
-    const profileNames = [...new Set([...profiles.map((item) => item.profile), ...acceptedCatalogueProfiles])];
+    const canonicalProfiles = profiles.map((item) => {
+      const canonicalKey = catalogueKeyByName.get(profileKey(item.profile));
+      return {
+        ...item,
+        profile: normalizeProfile(
+          canonicalKey ? catalogueNameByKey.get(canonicalKey) ?? item.profile : item.profile,
+        ),
+      };
+    });
+    const selectedProfileKeys = new Set(canonicalProfiles.map((item) => profileKey(item.profile)));
 
-    // Defense in depth: only profiles/quantities originating from this Offer are allowed.
+    // Load the Offer's eligible units, then compare normalized catalogue keys in memory.
+    // SQL `IN` with case-insensitive collation still treats whitespace as significant,
+    // so catalogued `IPE360` would otherwise miss legacy piece rows stored as `IPE 360`.
+    // This mirrors preparation's matching behavior and keeps proposal allocation tied
+    // to the exact eligible unit IDs for this Offer.
     const existing = await this.prisma.pieceUnit.findMany({
       where: {
         status: "PENDING",
@@ -684,7 +695,6 @@ export class FaconnageService {
         piece: {
           offerId,
           status: { not: "ARCHIVED" },
-          profile: { in: profileNames, mode: "insensitive" },
         },
       },
       select: { id: true, piece: { select: { profile: true, lengthMm: true } } },
@@ -695,19 +705,28 @@ export class FaconnageService {
     for (const unit of existing) {
       const canonicalProfileKey =
         catalogueKeyByName.get(profileKey(unit.piece.profile)) ?? profileKey(unit.piece.profile);
+      if (!selectedProfileKeys.has(canonicalProfileKey)) continue;
       const key = `${canonicalProfileKey}\u0000${unit.piece.lengthMm}`;
       allowed.set(key, (allowed.get(key) ?? 0) + 1);
       const pool = unitPools.get(key);
       if (pool) pool.ids.push(unit.id);
       else unitPools.set(key, { ids: [unit.id], nextIndex: 0 });
     }
-    for (const profile of profiles) {
+    for (const profile of canonicalProfiles) {
       for (const requirement of profile.requirements) {
-        const available = allowed.get(`${profileKey(profile.profile)}\u0000${requirement.lengthMm}`) ?? 0;
+        const canonicalProfileKey =
+          catalogueKeyByName.get(profileKey(profile.profile)) ?? profileKey(profile.profile);
+        const available = allowed.get(`${canonicalProfileKey}\u0000${requirement.lengthMm}`) ?? 0;
         if (requirement.quantity > available) {
           throw new BadRequestException({
             code: "FACONNAGE_REQUIREMENT_OUTSIDE_OFFER",
-            message: `Le besoin ${profile.profile} / ${requirement.lengthMm} mm ne correspond pas aux pièces de cette offre.`,
+            message: `Le besoin ${profile.profile} / ${requirement.lengthMm} mm demande ${requirement.quantity} pièce(s), mais ${available} seulement sont encore disponibles dans cette affaire. Actualisez la préparation du façonnage.`,
+            details: {
+              profile: profile.profile,
+              lengthMm: requirement.lengthMm,
+              requestedQuantity: requirement.quantity,
+              availableQuantity: available,
+            },
           });
         }
       }
@@ -716,8 +735,8 @@ export class FaconnageService {
     let results;
     try {
       results = this.optimizerExecution
-        ? await this.optimizerExecution.optimize(profiles)
-        : await Promise.all(profiles.map((profile) => this.optimizer.optimize(profile)));
+        ? await this.optimizerExecution.optimize(canonicalProfiles)
+        : await Promise.all(canonicalProfiles.map((profile) => this.optimizer.optimize(profile)));
     } catch (error) {
       if (error instanceof RawStockLimitError) {
         throw new BadRequestException({

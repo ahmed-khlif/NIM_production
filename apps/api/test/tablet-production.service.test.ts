@@ -406,6 +406,7 @@ describe("TabletProductionService", () => {
   it("starts an assigned bar once and publishes only after its transaction commits", async () => {
     const events: string[] = [];
     const transaction = {
+      machineSession: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
       machineSessionOperator: {
         findFirst: vi.fn().mockResolvedValue({
           machineSession: { id: "machine-session-1", machineId: machine.id, machine },
@@ -492,6 +493,7 @@ describe("TabletProductionService", () => {
     }).cuttingBar;
     bar.assignments = [];
     const transaction = {
+      machineSession: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
       machineSessionOperator: {
         findFirst: vi.fn().mockResolvedValue({
           machineSession: { id: "machine-session-1", machineId: machine.id, machine },

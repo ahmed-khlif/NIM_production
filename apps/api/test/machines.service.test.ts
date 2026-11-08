@@ -150,7 +150,7 @@ describe("MachinesService", () => {
       productionOperation: { count: vi.fn().mockResolvedValue(1) },
       machineBarAssignment: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
       machineSession: { findFirst: vi.fn().mockResolvedValue(null) },
-      productionRun: { findFirst: vi.fn().mockResolvedValue(null) },
+      productionRun: { count: vi.fn().mockResolvedValue(0), findFirst: vi.fn().mockResolvedValue(null) },
       cuttingBar: { count: vi.fn().mockResolvedValue(0), groupBy: vi.fn().mockResolvedValue([]) },
     };
     const service = createService(prisma as never);
@@ -226,9 +226,11 @@ describe("MachinesService", () => {
           ]),
       },
       machineSession: { findFirst: vi.fn().mockResolvedValue(null) },
-      productionRun: { findFirst: vi.fn().mockResolvedValue(null) },
+      productionRun: {
+        count: vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(5).mockResolvedValueOnce(2),
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
       cuttingBar: {
-        count: vi.fn().mockResolvedValueOnce(5).mockResolvedValueOnce(2),
         groupBy: vi.fn().mockResolvedValue([
           { status: "AFFECTEE", _count: { _all: 1 } },
           { status: "LANCEE", _count: { _all: 1 } },
@@ -259,11 +261,32 @@ describe("MachinesService", () => {
       machineId: "machine-1", active: true,
       cuttingBar: { is: expect.objectContaining({ status: "AFFECTEE", OR: expect.any(Array) }) },
     }) }));
-    expect(prisma.cuttingBar.count).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        where: expect.objectContaining({ fabricatedAt: { gte: expect.any(Date) } }),
+    expect(prisma.productionRun.count).toHaveBeenCalledWith({
+      where: { machineId: "machine-1", status: "RUNNING" },
+    });
+    expect(prisma.productionRun.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        machineId: "machine-1",
+        status: "COMPLETED",
+        finishedAt: { gte: expect.any(Date) },
       }),
-    );
+    });
+    expect(prisma.assignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        machineId: "machine-1",
+        active: true,
+        barAssignmentId: null,
+        pieceUnit: expect.objectContaining({
+          NOT: {
+            barMemberships: {
+              some: {
+                active: true,
+                cuttingBar: { is: { assignments: { some: { active: true } } } },
+              },
+            },
+          },
+        }),
+      }),
+    }));
   });
 });

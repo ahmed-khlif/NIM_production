@@ -324,7 +324,12 @@ export class OffersService {
           }
         : {}),
     };
-    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "name", "clientName", "site", "status", "createdAt", "updatedAt"] as const, { sortBy: "status", sortDirection: "asc" });
+    const sort = parseListSort(
+      options.sortBy,
+      options.sortDirection,
+      ["reference", "name", "clientName", "site", "status", "createdAt", "updatedAt"] as const,
+      { sortBy: "status", sortDirection: "asc" },
+    );
     const orderBy: Prisma.OfferOrderByWithRelationInput[] = [
       { [sort.sortBy]: sort.sortDirection },
       { id: "asc" },
@@ -473,7 +478,14 @@ export class OffersService {
 
   async getProductionSummary(
     id: string,
-    options: { page?: number; pageSize?: number; search?: string; status?: string; sortBy?: string; sortDirection?: string } = {},
+    options: {
+      page?: number;
+      pageSize?: number;
+      search?: string;
+      status?: string;
+      sortBy?: string;
+      sortDirection?: string;
+    } = {},
   ) {
     const offer = await this.findRecord(id);
     const page = options.page ?? 1;
@@ -501,7 +513,12 @@ export class OffersService {
         code: "VALIDATION_ERROR",
         message: "Le filtre de statut de pièce est invalide.",
       });
-    const sort = parseListSort(options.sortBy, options.sortDirection, ["reference", "profile", "quantity"] as const, { sortBy: "profile", sortDirection: "asc" });
+    const sort = parseListSort(
+      options.sortBy,
+      options.sortDirection,
+      ["reference", "profile", "quantity"] as const,
+      { sortBy: "profile", sortDirection: "asc" },
+    );
     const allPiecesWhere: Prisma.PieceWhereInput = { offerId: id, status: { not: "ARCHIVED" } };
     const filteredPiecesWhere: Prisma.PieceWhereInput = {
       ...allPiecesWhere,
@@ -524,7 +541,9 @@ export class OffersService {
       unitGroups,
       totalUnitsAggregate,
       activeAssignments,
+      activeBarAssignments,
       activeOperations,
+      activeProductionRuns,
       pendingQuality,
     ] = await Promise.all([
       this.prisma.piece.findMany({
@@ -555,8 +574,27 @@ export class OffersService {
       this.prisma.assignment.count({
         where: { active: true, pieceUnit: { piece: { offerId: id } } },
       }),
+      this.prisma.machineBarAssignment.count({
+        where: { active: true, cuttingBar: { offerId: id } },
+      }),
       this.prisma.productionOperation.count({
-        where: { status: "IN_PROGRESS", piece: { offerId: id } },
+        where: {
+          status: "IN_PROGRESS",
+          piece: { offerId: id },
+          NOT: {
+            pieceUnit: {
+              barMemberships: {
+                some: {
+                  active: true,
+                  cuttingBar: { is: { assignments: { some: { active: true } } } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.productionRun.count({
+        where: { status: "RUNNING", cuttingBar: { offerId: id } },
       }),
       this.prisma.pieceUnit.count({
         where: { status: "QUALITY_PENDING", piece: { offerId: id, status: { not: "ARCHIVED" } } },
@@ -602,6 +640,8 @@ export class OffersService {
         pendingQuality,
         activeAssignments,
         activeOperations,
+        activeBarAssignments,
+        activeProductionRuns,
         productionRate: percentage(manufacturedUnits, totalUnits),
         completionRate: percentage(resolvedUnits, totalUnits),
       },
@@ -762,7 +802,7 @@ export class OffersService {
     }
 
     if (nextStatus === "COMPLETED") {
-      const [unresolvedUnits, activeOperations] = await Promise.all([
+      const [unresolvedUnits, activeOperations, activeProductionRuns] = await Promise.all([
         this.prisma.pieceUnit.count({
           where: {
             piece: { offerId: id, status: { not: "ARCHIVED" } },
@@ -770,10 +810,26 @@ export class OffersService {
           },
         }),
         this.prisma.productionOperation.count({
-          where: { piece: { offerId: id }, status: "IN_PROGRESS" },
+          where: {
+            piece: { offerId: id },
+            status: "IN_PROGRESS",
+            NOT: {
+              pieceUnit: {
+                barMemberships: {
+                  some: {
+                    active: true,
+                    cuttingBar: { is: { assignments: { some: { active: true } } } },
+                  },
+                },
+              },
+            },
+          },
+        }),
+        this.prisma.productionRun.count({
+          where: { cuttingBar: { offerId: id }, status: "RUNNING" },
         }),
       ]);
-      if (activeOperations > 0 || unresolvedUnits > 0) {
+      if (activeOperations > 0 || activeProductionRuns > 0 || unresolvedUnits > 0) {
         throw new BadRequestException({
           code: "OFFER_PRODUCTION_NOT_FINISHED",
           message:
@@ -1018,5 +1074,4 @@ export class OffersService {
     });
     return { success: true };
   }
-
 }

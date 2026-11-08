@@ -16,9 +16,84 @@ import {
   pieceListQuerySchema,
   qualityDecisionSchema,
   qualityDispositionSchema,
+  createScheduleEventSchema,
+  createScheduleBatchSchema,
+  scheduleBatchPreviewSchema,
+  scheduleBoardQuerySchema,
+  scheduleFirstEventDateQuerySchema,
+  scheduleOfferDayQuerySchema,
+  updateScheduleEventSchema,
 } from "./index";
 
 describe("foundation validation", () => {
+  it("validates schedule event types, UTC intervals, machine blocks, and production teams", () => {
+    const base = {
+      startAt: "2026-11-06T08:00:00.000Z",
+      endAt: "2026-11-06T09:00:00.000Z",
+      machineId: "machine-1",
+    };
+    expect(createScheduleEventSchema.safeParse({
+      ...base,
+      type: "PRODUCTION",
+      cuttingBarId: "bar-1",
+      leadOperatorId: "operator-1",
+      helperOperatorIds: ["operator-2"],
+    }).success).toBe(true);
+    expect(createScheduleEventSchema.safeParse({
+      ...base,
+      type: "PRODUCTION",
+      cuttingBarId: "bar-1",
+      leadOperatorId: "operator-1",
+      helperOperatorIds: ["operator-1"],
+    }).success).toBe(false);
+    expect(createScheduleEventSchema.safeParse({ ...base, type: "PRODUCTION", cuttingBarId: "bar-1" }).success).toBe(false);
+    expect(createScheduleEventSchema.safeParse({ ...base, type: "MAINTENANCE", title: "Entretien" }).success).toBe(true);
+    expect(createScheduleEventSchema.safeParse({ ...base, type: "MACHINE_BLOCK", title: "Fermeture", cuttingBarId: "bar-1" }).success).toBe(false);
+    expect(createScheduleEventSchema.safeParse({ ...base, type: "MACHINE_BLOCK", title: "Fermeture", endAt: base.startAt }).success).toBe(false);
+  });
+
+  it("bounds planning board queries and accepts partial reschedule patches", () => {
+    const base = {
+      startAt: "2026-11-06T08:00:00.000Z",
+      endAt: "2026-11-07T08:00:00.000Z",
+    };
+    expect(scheduleBoardQuerySchema.parse(base)).toMatchObject({ status: "PLANNED", pageSize: 20, unscheduledPage: 1 });
+    expect(scheduleBoardQuerySchema.safeParse({ ...base, endAt: "2027-01-01T08:00:00.000Z" }).success).toBe(false);
+    expect(updateScheduleEventSchema.parse({ startAt: "2026-11-06T10:00:00.000Z" })).toEqual({ startAt: "2026-11-06T10:00:00.000Z" });
+    expect(updateScheduleEventSchema.safeParse({ startAt: "2026-11-06T10:00:00.000Z", endAt: "2026-11-06T09:00:00.000Z" }).success).toBe(false);
+  });
+
+  it("validates an Affaire-wide planning batch and rejects duplicate or invalid bar selections", () => {
+    const base = {
+      offerId: "offer-1",
+      startAt: "2026-11-06T08:00:00.000Z",
+      durationMinutes: 60,
+      gapMinutes: 10,
+      leadOperatorId: "operator-1",
+      helperOperatorIds: ["operator-2"],
+    };
+    expect(scheduleBatchPreviewSchema.parse(base)).toMatchObject({ gapMinutes: 10, helperOperatorIds: ["operator-2"] });
+    expect(createScheduleBatchSchema.parse({ ...base, cuttingBarIds: ["bar-1", "bar-2"] }).cuttingBarIds).toHaveLength(2);
+    expect(createScheduleBatchSchema.safeParse({ ...base, cuttingBarIds: [] }).success).toBe(false);
+    expect(createScheduleBatchSchema.safeParse({ ...base, cuttingBarIds: ["bar-1", "bar-1"] }).success).toBe(false);
+    expect(scheduleBatchPreviewSchema.safeParse({ ...base, durationMinutes: 0 }).success).toBe(false);
+    expect(scheduleBatchPreviewSchema.safeParse({ ...base, helperOperatorIds: ["operator-1"] }).success).toBe(false);
+    expect(scheduleBatchPreviewSchema.safeParse({ ...base, cuttingBarIds: Array.from({ length: 501 }, (_, index) => `bar-${index}`) }).success).toBe(false);
+  });
+
+  it("accepts only real local calendar dates for the Affair day schedule", () => {
+    expect(scheduleOfferDayQuerySchema.parse({ date: "2026-11-08" })).toEqual({ date: "2026-11-08" });
+    expect(scheduleOfferDayQuerySchema.safeParse({ date: "2026-02-30" }).success).toBe(false);
+    expect(scheduleOfferDayQuerySchema.safeParse({ date: "08/11/2026" }).success).toBe(false);
+  });
+
+  it("validates optional scope filters for the initial planning date", () => {
+    expect(scheduleFirstEventDateQuerySchema.parse({})).toEqual({});
+    expect(scheduleFirstEventDateQuerySchema.parse({ offerId: "offer-1", machineId: "machine-1" })).toEqual({ offerId: "offer-1", machineId: "machine-1" });
+    expect(scheduleFirstEventDateQuerySchema.safeParse({ offerId: " " }).success).toBe(false);
+    expect(scheduleFirstEventDateQuerySchema.safeParse({ machineId: "m".repeat(65) }).success).toBe(false);
+  });
+
   it("uses the existing username/password account for operator tablet login", () => {
     expect(operatorLoginSchema.parse({ username: " Operator_1 ", password: "secret" })).toEqual({ username: "Operator_1", password: "secret" });
     expect(operatorLoginSchema.safeParse({ connectionKey: "NIM-old-key" }).success).toBe(false);
@@ -138,6 +213,7 @@ describe("foundation validation", () => {
       pageSize: 50,
       search: "IPE",
       profile: "IPE200",
+      designation: "",
     });
     expect(pieceListQuerySchema.safeParse({ page: 0 }).success).toBe(false);
     expect(pieceListQuerySchema.safeParse({ pageSize: 101 }).success).toBe(false);

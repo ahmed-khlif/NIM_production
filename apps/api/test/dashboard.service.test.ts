@@ -19,20 +19,22 @@ describe("DashboardService", () => {
     const todayUtc = new Date().toISOString().slice(0, 10);
     const prisma = {
       piece: {
-        findMany: vi.fn().mockResolvedValue([
-          {
-            id: "piece-1",
-            reference: "CMD-001",
-            profile: "HEA 200",
-            lengthMm: 6000,
-            quantity: 2,
-            priority: "HIGH",
-            dueDate,
-            status: "IN_PROGRESS",
-            _count: { units: 1 },
-            units: [{ currentMachine: { name: "CNC-01" } }],
-          },
-        ]),
+        findMany: vi.fn()
+          .mockResolvedValueOnce([
+            {
+              id: "piece-1",
+              reference: "CMD-001",
+              profile: "HEA 200",
+              lengthMm: 6000,
+              quantity: 2,
+              priority: "HIGH",
+              dueDate,
+              status: "IN_PROGRESS",
+              _count: { units: 1 },
+              units: [{ currentMachine: { name: "CNC-01" } }],
+            },
+          ])
+          .mockResolvedValueOnce([]),
       },
       machine: {
         findMany: vi.fn().mockResolvedValue([
@@ -42,7 +44,7 @@ describe("DashboardService", () => {
             internalNumber: "CNC-01",
             type: "Découpe",
             status: "ACTIVE",
-            _count: { assignments: 1, productionOperations: 1 },
+            _count: { barAssignments: 1, productionRuns: 1 },
           },
         ]),
       },
@@ -146,11 +148,45 @@ describe("DashboardService", () => {
       nonConformUnits: 1,
     });
     expect(prisma.$queryRaw).toHaveBeenCalledOnce();
-    expect(prisma.piece.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 100, select: expect.objectContaining({ _count: expect.any(Object) }) }),
+    const aggregateSql = (
+      prisma.$queryRaw.mock.calls[0]?.[0] as { strings: readonly string[] }
+    ).strings.join(" ");
+    expect(aggregateSql).toContain('"ProductionRun"');
+    expect(aggregateSql).toContain('"MachineBarAssignment"');
+    expect(aggregateSql).toContain('"standaloneOperationEvents"');
+    expect(aggregateSql).toContain('"releasedAt"');
+    expect(prisma.piece.findMany).toHaveBeenCalledTimes(2);
+    expect(prisma.piece.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: { status: { notIn: ["COMPLETED", "ARCHIVED"] } },
+        take: 8,
+        select: expect.objectContaining({ _count: expect.any(Object) }),
+      }),
+    );
+    expect(prisma.piece.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({ status: { notIn: ["COMPLETED", "ARCHIVED"] }, dueDate: expect.objectContaining({ lt: expect.any(Date) }) }),
+        take: 8,
+      }),
     );
     expect(prisma.machine.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ select: expect.objectContaining({ _count: expect.any(Object) }) }),
+      expect.objectContaining({
+        select: expect.objectContaining({
+          _count: {
+            select: {
+              barAssignments: {
+                where: {
+                  active: true,
+                  cuttingBar: { is: { status: "AFFECTEE" } },
+                },
+              },
+              productionRuns: { where: { status: "RUNNING" } },
+            },
+          },
+        }),
+      }),
     );
   });
 

@@ -138,7 +138,14 @@ export class MachinesService {
   }
 
   async listMachinesPage(
-    options: { page?: number; pageSize?: number; search?: string; status?: string; sortBy?: string; sortDirection?: string } = {},
+    options: {
+      page?: number;
+      pageSize?: number;
+      search?: string;
+      status?: string;
+      sortBy?: string;
+      sortDirection?: string;
+    } = {},
   ) {
     const page = options.page ?? 1;
     const pageSize = options.pageSize ?? 20;
@@ -180,8 +187,16 @@ export class MachinesService {
           }
         : {}),
     };
-    const sort = parseListSort(options.sortBy, options.sortDirection, ["name", "type", "location", "status"] as const, { sortBy: "status", sortDirection: "asc" });
-    const orderBy: Prisma.MachineOrderByWithRelationInput[] = [{ [sort.sortBy]: sort.sortDirection }, { id: "asc" }];
+    const sort = parseListSort(
+      options.sortBy,
+      options.sortDirection,
+      ["name", "type", "location", "status"] as const,
+      { sortBy: "status", sortDirection: "asc" },
+    );
+    const orderBy: Prisma.MachineOrderByWithRelationInput[] = [
+      { [sort.sortBy]: sort.sortDirection },
+      { id: "asc" },
+    ];
     const [machines, barCounts, total, statusGroups] = await Promise.all([
       this.prisma.machine.findMany({
         where,
@@ -298,13 +313,31 @@ export class MachinesService {
               ? { cuttingBar: { reference: sortOrder } }
               : { cuttingBar: { profile: sortOrder } };
     const barOrderBy: Prisma.MachineBarAssignmentOrderByWithRelationInput[] = options.sortBy
-      ? [primaryBarOrder, { cuttingBar: { reference: "asc" } }, { assignedAt: "desc" }, { id: "asc" }]
-      : [{ cuttingBar: { profile: "asc" } }, { cuttingBar: { reference: "asc" } }, { assignedAt: "desc" }];
+      ? [
+          primaryBarOrder,
+          { cuttingBar: { reference: "asc" } },
+          { assignedAt: "desc" },
+          { id: "asc" },
+        ]
+      : [
+          { cuttingBar: { profile: "asc" } },
+          { cuttingBar: { reference: "asc" } },
+          { assignedAt: "desc" },
+        ];
     const queueWhere: Prisma.AssignmentWhereInput = {
       machineId: id,
       active: true,
+      barAssignmentId: null,
       pieceUnit: {
         status: "ASSIGNED",
+        NOT: {
+          barMemberships: {
+            some: {
+              active: true,
+              cuttingBar: { is: { assignments: { some: { active: true } } } },
+            },
+          },
+        },
         ...(search
           ? {
               piece: {
@@ -321,6 +354,7 @@ export class MachinesService {
       queue,
       queueCount,
       activeOperationCount,
+      activeProductionRunCount,
       activeBarAssignments,
       activeBarCount,
       barStatusGroups,
@@ -337,7 +371,23 @@ export class MachinesService {
         take: pageSize,
       }),
       this.prisma.assignment.count({ where: queueWhere }),
-      this.prisma.productionOperation.count({ where: { machineId: id, status: "IN_PROGRESS" } }),
+      this.prisma.productionOperation.count({
+        where: {
+          machineId: id,
+          status: "IN_PROGRESS",
+          NOT: {
+            pieceUnit: {
+              barMemberships: {
+                some: {
+                  active: true,
+                  cuttingBar: { is: { assignments: { some: { active: true } } } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.productionRun.count({ where: { machineId: id, status: "RUNNING" } }),
       this.prisma.machineBarAssignment.findMany({
         where: barWhere,
         include: { cuttingBar: { select: machineBarSelect } },
@@ -351,14 +401,14 @@ export class MachinesService {
         where: { assignments: { some: { machineId: id, active: true } } },
         _count: { _all: true },
       }),
-      this.prisma.cuttingBar.count({
-        where: { status: "FABRIQUEE", assignments: { some: { machineId: id, active: true } } },
+      this.prisma.productionRun.count({
+        where: { machineId: id, status: "COMPLETED" },
       }),
-      this.prisma.cuttingBar.count({
+      this.prisma.productionRun.count({
         where: {
-          status: "FABRIQUEE",
-          fabricatedAt: { gte: startOfTunisianDay() },
-          assignments: { some: { machineId: id, active: true } },
+          machineId: id,
+          status: "COMPLETED",
+          finishedAt: { gte: startOfTunisianDay() },
         },
       }),
       this.prisma.machineSession.findFirst({
@@ -411,6 +461,7 @@ export class MachinesService {
         totalPages: Math.max(1, Math.ceil(queueCount / pageSize)),
       },
       activeOperationCount,
+      activeProductionRunCount,
       assignedBarCount: activeBarCount,
       cuttingBars,
       cuttingBarsPagination: {
@@ -468,7 +519,7 @@ export class MachinesService {
         : null,
       barMetrics: {
         assigned: barStatusGroups.find((group) => group.status === "AFFECTEE")?._count._all ?? 0,
-        inProgress: barStatusGroups.find((group) => group.status === "LANCEE")?._count._all ?? 0,
+        inProgress: activeProductionRunCount,
         fabricatedToday,
         fabricatedTotal,
       },

@@ -54,7 +54,7 @@ type DashboardMachineRow = {
   internalNumber: string;
   type: string;
   status: "ACTIVE" | "MAINTENANCE" | "INACTIVE";
-  _count: { assignments: number; productionOperations: number };
+  _count: { barAssignments: number; productionRuns: number };
 };
 
 type DashboardAggregateRow = {
@@ -151,66 +151,75 @@ export class DashboardService implements OnModuleDestroy {
     const trendEnd = new Date(trendStart);
     trendEnd.setUTCDate(trendEnd.getUTCDate() + days);
     const aggregateCacheKey = `${days}:${startOfToday.toISOString()}`;
-    const [pieces, machines, recentEvents, aggregates] = await Promise.all([
-      this.prisma.piece.findMany({
-        where: { status: { not: "ARCHIVED" } },
-        select: pieceSelect,
-        orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
-        take: 100,
-      }),
-      this.prisma.machine.findMany({
-        orderBy: [{ status: "asc" }, { name: "asc" }],
-        select: {
-          id: true,
-          name: true,
-          internalNumber: true,
-          type: true,
-          status: true,
-          _count: {
-            select: {
-              assignments: { where: { active: true, pieceUnit: { status: "ASSIGNED" } } },
-              productionOperations: { where: { status: "IN_PROGRESS" } },
+    const [activePieceRows, delayedPieceRows, machines, recentEvents, aggregates] =
+      await Promise.all([
+        this.prisma.piece.findMany({
+          where: { status: { notIn: ["COMPLETED", "ARCHIVED"] } },
+          select: pieceSelect,
+          orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }, { id: "asc" }],
+          take: 8,
+        }),
+        this.prisma.piece.findMany({
+          where: {
+            status: { notIn: ["COMPLETED", "ARCHIVED"] },
+            dueDate: { lt: now },
+          },
+          select: pieceSelect,
+          orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }, { id: "asc" }],
+          take: 8,
+        }),
+        this.prisma.machine.findMany({
+          orderBy: [{ status: "asc" }, { name: "asc" }],
+          select: {
+            id: true,
+            name: true,
+            internalNumber: true,
+            type: true,
+            status: true,
+            _count: {
+              select: {
+                barAssignments: {
+                  where: {
+                    active: true,
+                    cuttingBar: { is: { status: "AFFECTEE" } },
+                  },
+                },
+                productionRuns: { where: { status: "RUNNING" } },
+              },
             },
           },
-        },
-      }),
-      this.prisma.historyEvent.findMany({
-        take: 8,
-        orderBy: { createdAt: "desc" },
-        include: {
-          actor: { select: { displayName: true } },
-        },
-      }),
-      this.getDashboardAggregates(aggregateCacheKey, {
-        now,
-        startOfToday,
-        endOfToday,
-        endOfNextSevenDays,
-        trendStart,
-        trendEnd,
-      }),
-    ]);
+        }),
+        this.prisma.historyEvent.findMany({
+          take: 8,
+          orderBy: { createdAt: "desc" },
+          include: {
+            actor: { select: { displayName: true } },
+          },
+        }),
+        this.getDashboardAggregates(aggregateCacheKey, {
+          now,
+          startOfToday,
+          endOfToday,
+          endOfNextSevenDays,
+          trendStart,
+          trendEnd,
+        }),
+      ]);
 
-    const mappedPieces = pieces.map((piece) => this.toDashboardPiece(piece));
-    const delayedPieces = mappedPieces
-      .filter(
-        (piece) =>
-          piece.dueDate &&
-          new Date(piece.dueDate) < now &&
-          !["COMPLETED", "ARCHIVED"].includes(piece.status),
-      )
-      .map(
-        (piece) =>
-          ({
-            ...piece,
-            delayDays: this.delayDays(piece.dueDate as string, now),
-          }) satisfies DashboardDelayedPiece,
-      );
+    const activePieces = activePieceRows.map((piece) => this.toDashboardPiece(piece));
+    const delayedPieces = delayedPieceRows.map((piece) => {
+      const mapped = this.toDashboardPiece(piece);
+      return {
+        ...mapped,
+        delayDays: this.delayDays(mapped.dueDate as string, now),
+      } satisfies DashboardDelayedPiece;
+    });
 
     const machineLoads = machines.map((machine) => this.toMachineLoad(machine));
-    const progressPercent = aggregates.totalUnits === 0
-      ? 0
-      : Math.round((aggregates.completedUnits / aggregates.totalUnits) * 100);
+    const progressPercent =
+      aggregates.totalUnits === 0
+        ? 0
+        : Math.round((aggregates.completedUnits / aggregates.totalUnits) * 100);
     const unitStatusBreakdown = dashboardUnitStatuses.map(
       (status): DashboardUnitStatusBreakdown => ({
         status,
@@ -221,8 +230,10 @@ export class DashboardService implements OnModuleDestroy {
       priority,
       count: aggregates.priorityCounts.find((item) => item.priority === priority)?.count ?? 0,
     }));
-    const conformUnits = aggregates.qualityCounts.find((item) => item.result === "CONFORM")?.count ?? 0;
-    const nonConformUnits = aggregates.qualityCounts.find((item) => item.result === "NON_CONFORM")?.count ?? 0;
+    const conformUnits =
+      aggregates.qualityCounts.find((item) => item.result === "CONFORM")?.count ?? 0;
+    const nonConformUnits =
+      aggregates.qualityCounts.find((item) => item.result === "NON_CONFORM")?.count ?? 0;
     const inspectedUnits = conformUnits + nonConformUnits;
     const quality: DashboardQualitySummary = {
       pendingUnits: aggregates.qualityPendingCount,
@@ -269,8 +280,8 @@ export class DashboardService implements OnModuleDestroy {
       },
       machineLoads,
       recentActivity: recentEvents.map((event) => this.toHistoryEvent(event)),
-      delayedPieces: delayedPieces.slice(0, 8),
-      activePieces: mappedPieces.slice(0, 8),
+      delayedPieces,
+      activePieces,
       statusBreakdown: dashboardStatuses.map((status) => ({
         status,
         count: aggregates.statusCounts.find((item) => item.status === status)?.count ?? 0,
@@ -371,18 +382,64 @@ export class DashboardService implements OnModuleDestroy {
         INNER JOIN "activePieces" piece ON piece."id" = disposition."pieceId"
         GROUP BY disposition."type"
       ),
-      "operationEvents" AS (
-        SELECT TO_CHAR(DATE_TRUNC('day', "startedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
-               1::int AS "startedUnits", 0::int AS "completedUnits"
-        FROM "ProductionOperation"
-        WHERE "startedAt" >= ${window.trendStart} AND "startedAt" < ${window.trendEnd}
+      "barRunEvents" AS (
+        SELECT TO_CHAR(DATE_TRUNC('day', run."startedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               COUNT(item."pieceUnitId")::int AS "startedUnits", 0::int AS "completedUnits"
+        FROM "ProductionRun" run
+        INNER JOIN "CuttingBarItem" item ON item."cuttingBarId" = run."cuttingBarId"
+          AND item."createdAt" <= run."startedAt"
+          AND (item."releasedAt" IS NULL OR item."releasedAt" > run."startedAt")
+        WHERE run."startedAt" >= ${window.trendStart} AND run."startedAt" < ${window.trendEnd}
+        GROUP BY 1
         UNION ALL
-        SELECT TO_CHAR(DATE_TRUNC('day', "completedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
-               0::int AS "startedUnits", 1::int AS "completedUnits"
-        FROM "ProductionOperation"
-        WHERE "startedAt" >= ${window.trendStart} AND "startedAt" < ${window.trendEnd}
-          AND "status" = 'COMPLETED'
-          AND "completedAt" >= ${window.trendStart} AND "completedAt" < ${window.trendEnd}
+        SELECT TO_CHAR(DATE_TRUNC('day', run."finishedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               0::int AS "startedUnits", COUNT(item."pieceUnitId")::int AS "completedUnits"
+        FROM "ProductionRun" run
+        INNER JOIN "CuttingBarItem" item ON item."cuttingBarId" = run."cuttingBarId"
+          AND item."createdAt" <= run."finishedAt"
+          AND (item."releasedAt" IS NULL OR item."releasedAt" > run."finishedAt")
+        WHERE run."status" = 'COMPLETED'
+          AND run."finishedAt" >= ${window.trendStart} AND run."finishedAt" < ${window.trendEnd}
+        GROUP BY 1
+      ),
+      "standaloneOperationEvents" AS (
+        SELECT TO_CHAR(DATE_TRUNC('day', operation."startedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               COUNT(*)::int AS "startedUnits", 0::int AS "completedUnits"
+        FROM "ProductionOperation" operation
+        WHERE operation."startedAt" >= ${window.trendStart} AND operation."startedAt" < ${window.trendEnd}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "CuttingBarItem" item
+            INNER JOIN "MachineBarAssignment" assignment ON assignment."cuttingBarId" = item."cuttingBarId"
+            WHERE item."pieceUnitId" = operation."pieceUnitId"
+              AND item."createdAt" <= operation."startedAt"
+              AND (item."releasedAt" IS NULL OR item."releasedAt" > operation."startedAt")
+              AND assignment."assignedAt" <= operation."startedAt"
+              AND (assignment."unassignedAt" IS NULL OR assignment."unassignedAt" > operation."startedAt")
+          )
+        GROUP BY 1
+        UNION ALL
+        SELECT TO_CHAR(DATE_TRUNC('day', operation."completedAt" AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS "date",
+               0::int AS "startedUnits", COUNT(*)::int AS "completedUnits"
+        FROM "ProductionOperation" operation
+        WHERE operation."status" = 'COMPLETED'
+          AND operation."completedAt" >= ${window.trendStart} AND operation."completedAt" < ${window.trendEnd}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "CuttingBarItem" item
+            INNER JOIN "MachineBarAssignment" assignment ON assignment."cuttingBarId" = item."cuttingBarId"
+            WHERE item."pieceUnitId" = operation."pieceUnitId"
+              AND item."createdAt" <= operation."completedAt"
+              AND (item."releasedAt" IS NULL OR item."releasedAt" > operation."completedAt")
+              AND assignment."assignedAt" <= operation."completedAt"
+              AND (assignment."unassignedAt" IS NULL OR assignment."unassignedAt" > operation."completedAt")
+          )
+        GROUP BY 1
+      ),
+      "operationEvents" AS (
+        SELECT * FROM "barRunEvents"
+        UNION ALL
+        SELECT * FROM "standaloneOperationEvents"
       ),
       "operationTrend" AS (
         SELECT "date", SUM("startedUnits")::int AS "startedUnits",
@@ -484,8 +541,8 @@ export class DashboardService implements OnModuleDestroy {
   }
 
   private toMachineLoad(machine: DashboardMachineRow): DashboardMachineLoad {
-    const queueCount = machine._count.assignments;
-    const inProgressCount = machine._count.productionOperations;
+    const queueCount = machine._count.barAssignments;
+    const inProgressCount = machine._count.productionRuns;
     return {
       id: machine.id,
       name: machine.name,

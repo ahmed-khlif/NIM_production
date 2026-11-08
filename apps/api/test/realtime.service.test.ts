@@ -23,4 +23,19 @@ describe("RealtimeService", () => {
 
     expect(() => realtime.publish({ type: "piece.assigned", entityType: "ASSIGNMENT", entityId: "assignment-1" })).not.toThrow();
   });
+
+  it("isolates subscriber failures and still notifies remaining subscribers", () => {
+    const realtime = new RealtimeService();
+    const failingSubscriber = vi.fn(() => { throw new Error("subscriber failed"); });
+    const healthySubscriber = vi.fn();
+    const logError = vi.spyOn((realtime as unknown as { logger: { error: (message: string, stack?: string) => void } }).logger, "error").mockImplementation(() => undefined);
+    realtime.subscribe(failingSubscriber);
+    realtime.subscribe(healthySubscriber);
+
+    expect(() => realtime.publish({ type: "schedule.created", entityType: "SCHEDULE_EVENT", entityId: "schedule-1" })).not.toThrow();
+    expect(failingSubscriber).toHaveBeenCalledOnce();
+    expect(healthySubscriber).toHaveBeenCalledOnce();
+    expect(logError).toHaveBeenCalledOnce();
+    logError.mockRestore();
+  });
 });

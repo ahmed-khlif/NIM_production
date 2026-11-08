@@ -21,6 +21,7 @@ import { CuttingBarsModule } from "./cutting-bars/cutting-bars.module";
 import { OperatorsModule } from "./operators/operators.module";
 import { MaterialProfilesModule } from "./material-profiles/material-profiles.module";
 import { ClientsModule } from "./clients/clients.module";
+import { PlanningModule } from "./planning/planning.module";
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { ClientsModule } from "./clients/clients.module";
     OperatorsModule,
     MaterialProfilesModule,
     ClientsModule,
+    PlanningModule,
   ],
 })
 export class AppModule {}
